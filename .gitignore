@@ -1,0 +1,25 @@
+# Virtual environment
+.venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Output/logs/reports (user-specific runtime data)
+output/
+*.log
+*.html
+*.csv
+
+# Distribution archives and snapshots
+*.zip
+NicMonitor_v1.4/
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+Thumbs.db
+Desktop.ini
