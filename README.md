@@ -62,7 +62,6 @@
 ## Installation
 
 ```bash
-cd TFE_Creator
 pip install -r requirements.txt
 ```
 
