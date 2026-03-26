@@ -1,0 +1,6 @@
+# NetProbe v1.0.0 — Dependencies
+# ================================
+# Core monitoring works with Python stdlib only.
+# psutil is required for per-process network I/O monitoring.
+
+psutil>=5.9.0
