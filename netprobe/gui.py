@@ -1265,9 +1265,20 @@ class NetProbeGUI:
         if result.error:
             self._wp_status_var.set(f"Error: {result.error}")
         else:
+            # Compute transfer speed rating
+            speed_tag = ""
+            if result.download_ms > 0 and result.content_length > 0:
+                speed_mbps = (result.content_length * 8) / (result.download_ms / 1000) / 1_000_000
+                if speed_mbps >= 10:
+                    speed_tag = f" | ✅ {speed_mbps:.1f} Mbps (Fast)"
+                elif speed_mbps >= 2:
+                    speed_tag = f" | ⚠️ {speed_mbps:.1f} Mbps (Moderate)"
+                else:
+                    speed_tag = f" | ❌ {speed_mbps:.2f} Mbps (Slow)"
             self._wp_status_var.set(
                 f"Done — {result.total_ms:.0f}ms total | "
                 f"HTTP {result.status_code} | Bottleneck: {result.bottleneck}"
+                f"{speed_tag}"
             )
 
         # ----- Draw waterfall timing chart -----
@@ -1412,6 +1423,63 @@ class NetProbeGUI:
             anchor=tk.W, fill=COLORS["fg"],
             font=("Segoe UI", 10, "bold")
         )
+
+        # Transfer speed gauge (right side of canvas)
+        if result.download_ms > 0 and result.content_length > 0:
+            speed_kbps = (result.content_length / 1024) / (result.download_ms / 1000)
+            speed_mbps = (result.content_length * 8) / (result.download_ms / 1000) / 1_000_000
+
+            # Thresholds for single HTTP/1.1 connection
+            #   Green  ≥ 10 Mbps  — fast, no issues
+            #   Yellow  2–10 Mbps — acceptable, typical for HTTP/1.1
+            #   Red     < 2 Mbps  — slow, likely packet loss or throttling
+            if speed_mbps >= 10:
+                gauge_color = COLORS["green"]
+                rating = "FAST"
+            elif speed_mbps >= 2:
+                gauge_color = COLORS["yellow"]
+                rating = "MODERATE"
+            else:
+                gauge_color = COLORS["red"]
+                rating = "SLOW"
+
+            gx = w - 65
+            gy = 10
+            # Speed value
+            canvas.create_text(
+                gx, gy,
+                text=f"{speed_mbps:.1f}",
+                anchor=tk.N, fill=gauge_color,
+                font=("Consolas", 20, "bold")
+            )
+            # Unit
+            canvas.create_text(
+                gx, gy + 28,
+                text="Mbps",
+                anchor=tk.N, fill=gauge_color,
+                font=("Segoe UI", 9, "bold")
+            )
+            # Rating label
+            canvas.create_text(
+                gx, gy + 44,
+                text=rating,
+                anchor=tk.N, fill=gauge_color,
+                font=("Segoe UI", 9, "bold")
+            )
+            # KB/s line
+            canvas.create_text(
+                gx, gy + 60,
+                text=f"{speed_kbps:.0f} KB/s",
+                anchor=tk.N, fill=COLORS["fg_dim"],
+                font=("Consolas", 8)
+            )
+            # Size line
+            canvas.create_text(
+                gx, gy + 74,
+                text=f"{result.content_length / 1024:.0f} KB in {result.download_ms:.0f}ms",
+                anchor=tk.N, fill=COLORS["fg_dim"],
+                font=("Consolas", 8)
+            )
 
     # --- Tab 8: Event Log ---
 
