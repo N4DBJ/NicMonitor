@@ -1,4 +1,4 @@
-# NetProbe v1.4.0
+# NetProbe v1.5.0
 
 **Windows Network Latency Monitor** — A comprehensive diagnostic tool with a full GUI dashboard that measures network latency over time, similar to WinMTR, to help troubleshoot random network errors and latency spikes.
 
@@ -7,7 +7,7 @@
 ### GUI Dashboard
 - **Dark-themed graphical interface** — Professional dark UI built with tkinter (no extra dependencies)
 - **Live scrolling latency chart** — Canvas-based time-series graph with spike markers, threshold line, and timeout indicators
-- **8 tabbed panels** — Latency, Traceroute, Connections, Processes, NIC Health, Wireshark, Event Log, and Settings
+- **9 tabbed panels** — Latency, Traceroute, Connections, Processes, NIC Health, Wireshark, Web Probe, Event Log, and Settings
 - **Real-time stat cards** — Per-target latency stats updated live
 - **Point-and-click configuration** — All settings adjustable in the Settings tab, with save/load config
 
@@ -26,6 +26,15 @@
 - **Open pcap files** — Analyse existing .pcap/.pcapng captures without Wireshark GUI
 - **Interface selector** — Pick capture interface from auto-detected list
 - **Auto-detection** — Finds Wireshark/tshark in standard install locations or PATH
+
+### Web Probe — URL Load Analyser (v1.5.0)
+- **Per-phase timing breakdown** — Measures DNS resolution, TCP connect, TLS handshake, time-to-first-byte (TTFB), and content download individually
+- **Visual waterfall chart** — Color-coded horizontal bar chart highlighting the bottleneck phase
+- **Multi-resolver DNS comparison** — Tests your system DNS against Google (8.8.8.8), Cloudflare (1.1.1.1), and Quad9 (9.9.9.9) to identify DNS-specific delays
+- **Automatic bottleneck detection** — Pinpoints which phase is causing slowness with severity-rated diagnosis
+- **Wireshark integration** — Optional packet capture during the probe for deep-dive analysis
+- **Probe history** — Tracks all probes in a sortable table for comparison across attempts
+- **Redirect following** — Automatically follows HTTP redirects with timing for the final destination
 
 ### Report Charts & Event Log Correlation (v1.4.0)
 - **SVG latency charts in reports** — Inline SVG graphs embedded directly in the HTML report, mirroring the live GUI chart with spike markers, threshold line, and average overlay
@@ -155,6 +164,7 @@ netprobe/
 ├── process_monitor.py   # Per-process network I/O (psutil)
 ├── nic_monitor.py       # Physical NIC/cable health (PowerShell)
 ├── capture_monitor.py   # Wireshark packet capture & analysis
+├── web_monitor.py       # URL load timing & DNS diagnostics
 └── reporter.py          # Spike detection, CSV/HTML reports
 run_gui.py               # Convenience GUI launcher (double-click)
 ```
@@ -184,6 +194,10 @@ run_gui.py               # Convenience GUI launcher (double-click)
 | Packets | Zero-window (slow app) | tshark TCP analysis |
 | Packets | DNS failures | tshark DNS rcode analysis |
 | Packets | ICMP unreachable | tshark ICMP type filtering |
+| Web | Slow DNS resolution | WebProbe multi-resolver comparison |
+| Web | Slow server response (TTFB) | WebProbe per-phase timing |
+| Web | TLS/SSL negotiation delay | WebProbe TLS handshake timing |
+| Web | Overall page load delay | WebProbe total time + bottleneck ID |
 
 ## License
 

@@ -45,6 +45,7 @@ from netprobe.process_monitor import ProcessMonitor, PSUTIL_AVAILABLE
 from netprobe.reporter import Reporter
 from netprobe.nic_monitor import NicMonitor
 from netprobe.capture_monitor import CaptureMonitor
+from netprobe.web_monitor import WebProbeMonitor, WebProbeResult
 
 logger = logging.getLogger("netprobe.gui")
 
@@ -128,6 +129,9 @@ class NetProbeGUI:
         # v1.2.0: NIC health + Wireshark capture monitors
         self.nic_monitor: Optional[NicMonitor] = None
         self.capture_monitor: Optional[CaptureMonitor] = None
+
+        # v1.5.0: Web Probe monitor
+        self.web_probe: WebProbeMonitor = WebProbeMonitor()
 
         # Wireshark capture analysis results collected during the session
         self._capture_analyses: list = []
@@ -309,10 +313,13 @@ class NetProbeGUI:
         # Tab 6: Wireshark Capture & Analysis
         self._build_capture_tab()
 
-        # Tab 7: Event Log (spikes & anomalies)
+        # Tab 7: Web Probe (URL load timing & DNS diagnostics)
+        self._build_web_probe_tab()
+
+        # Tab 8: Event Log (spikes & anomalies)
         self._build_log_tab()
 
-        # Tab 8: Settings
+        # Tab 9: Settings
         self._build_settings_tab()
 
     # --- Tab 1: Latency ---
@@ -859,7 +866,318 @@ class NetProbeGUI:
             f"severity={analysis.severity}"
         )
 
-    # --- Tab 7: Event Log ---
+    # --- Tab 7: Web Probe ---
+
+    def _build_web_probe_tab(self) -> None:
+        """Build the URL load timing & DNS diagnostics tab."""
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="  🌐 Web Probe  ")
+
+        # ----- URL input row -----
+        input_frame = ttk.LabelFrame(tab, text="  URL Probe  ")
+        input_frame.pack(fill=tk.X, padx=8, pady=(8, 4))
+
+        row = ttk.Frame(input_frame)
+        row.pack(fill=tk.X, padx=8, pady=6)
+
+        ttk.Label(row, text="URL:").pack(side=tk.LEFT, padx=(0, 5))
+        self._wp_url_var = tk.StringVar(value="https://")
+        self._wp_url_entry = ttk.Entry(
+            row, textvariable=self._wp_url_var, width=55,
+            font=("Consolas", 11)
+        )
+        self._wp_url_entry.pack(side=tk.LEFT, padx=(0, 10), fill=tk.X, expand=True)
+        self._wp_url_entry.bind("<Return>", lambda e: self._on_web_probe_go())
+
+        self._wp_go_btn = ttk.Button(
+            row, text="▶ Go", style="Start.TButton",
+            command=self._on_web_probe_go
+        )
+        self._wp_go_btn.pack(side=tk.LEFT, padx=3)
+
+        # Wireshark capture + Follow redirects options
+        row2 = ttk.Frame(input_frame)
+        row2.pack(fill=tk.X, padx=8, pady=(0, 6))
+
+        self._wp_capture_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row2, text="Capture with Wireshark during probe",
+                         variable=self._wp_capture_var).pack(side=tk.LEFT, padx=(0, 15))
+
+        self._wp_redirect_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row2, text="Follow redirects",
+                         variable=self._wp_redirect_var).pack(side=tk.LEFT, padx=(0, 15))
+
+        self._wp_status_var = tk.StringVar(value="Enter a URL and click Go")
+        ttk.Label(row2, textvariable=self._wp_status_var, style="Dim.TLabel").pack(
+            side=tk.RIGHT, padx=5)
+
+        # ----- Timing breakdown -----
+        timing_frame = ttk.LabelFrame(tab, text="  Timing Breakdown  ")
+        timing_frame.pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        # Phase bars - canvas for visual waterfall
+        self._wp_waterfall = tk.Canvas(
+            timing_frame, height=160, bg=COLORS["bg_secondary"],
+            highlightthickness=0
+        )
+        self._wp_waterfall.pack(fill=tk.X, padx=8, pady=6)
+
+        # ----- DNS Comparison -----
+        dns_frame = ttk.LabelFrame(tab, text="  DNS Resolver Comparison  ")
+        dns_frame.pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        cols = ("resolver", "ip", "resolved", "time", "status")
+        self._wp_dns_tree = ttk.Treeview(
+            dns_frame, columns=cols, show="headings", height=4,
+            style="Dark.Treeview"
+        )
+        self._wp_dns_tree.heading("resolver", text="Resolver")
+        self._wp_dns_tree.heading("ip", text="Server")
+        self._wp_dns_tree.heading("resolved", text="Resolved IP")
+        self._wp_dns_tree.heading("time", text="Time (ms)")
+        self._wp_dns_tree.heading("status", text="Status")
+        self._wp_dns_tree.column("resolver", width=130)
+        self._wp_dns_tree.column("ip", width=110)
+        self._wp_dns_tree.column("resolved", width=140)
+        self._wp_dns_tree.column("time", width=90, anchor=tk.E)
+        self._wp_dns_tree.column("status", width=200)
+        self._wp_dns_tree.pack(fill=tk.X, padx=8, pady=4)
+
+        # ----- Diagnosis / findings -----
+        diag_frame = ttk.LabelFrame(tab, text="  Diagnosis  ")
+        diag_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        self._wp_diag_text = scrolledtext.ScrolledText(
+            diag_frame, wrap=tk.WORD, font=("Consolas", 10),
+            bg=COLORS["bg_secondary"], fg=COLORS["fg"],
+            insertbackground=COLORS["fg"], selectbackground=COLORS["bg_input"],
+            state=tk.DISABLED, relief=tk.FLAT, borderwidth=0, height=6,
+        )
+        self._wp_diag_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 8))
+        self._wp_diag_text.tag_configure("critical", foreground=COLORS["red"])
+        self._wp_diag_text.tag_configure("warning", foreground=COLORS["yellow"])
+        self._wp_diag_text.tag_configure("info", foreground=COLORS["green"])
+        self._wp_diag_text.tag_configure("ok", foreground=COLORS["green"])
+        self._wp_diag_text.tag_configure("header", foreground=COLORS["accent"],
+                                          font=("Segoe UI", 11, "bold"))
+
+        # ----- History treeview -----
+        hist_frame = ttk.LabelFrame(tab, text="  Probe History  ")
+        hist_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        hist_cols = ("time", "url", "dns", "tcp", "tls", "ttfb", "download", "total", "status")
+        self._wp_hist_tree = ttk.Treeview(
+            hist_frame, columns=hist_cols, show="headings", height=5,
+            style="Dark.Treeview"
+        )
+        self._wp_hist_tree.heading("time", text="Time")
+        self._wp_hist_tree.heading("url", text="URL")
+        self._wp_hist_tree.heading("dns", text="DNS")
+        self._wp_hist_tree.heading("tcp", text="TCP")
+        self._wp_hist_tree.heading("tls", text="TLS")
+        self._wp_hist_tree.heading("ttfb", text="TTFB")
+        self._wp_hist_tree.heading("download", text="Download")
+        self._wp_hist_tree.heading("total", text="Total")
+        self._wp_hist_tree.heading("status", text="HTTP")
+        self._wp_hist_tree.column("time", width=70)
+        self._wp_hist_tree.column("url", width=200)
+        self._wp_hist_tree.column("dns", width=65, anchor=tk.E)
+        self._wp_hist_tree.column("tcp", width=65, anchor=tk.E)
+        self._wp_hist_tree.column("tls", width=65, anchor=tk.E)
+        self._wp_hist_tree.column("ttfb", width=65, anchor=tk.E)
+        self._wp_hist_tree.column("download", width=75, anchor=tk.E)
+        self._wp_hist_tree.column("total", width=75, anchor=tk.E)
+        self._wp_hist_tree.column("status", width=55, anchor=tk.CENTER)
+        self._wp_hist_tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+
+    def _on_web_probe_go(self) -> None:
+        """Launch a web probe in a background thread."""
+        url = self._wp_url_var.get().strip()
+        if not url or url == "https://":
+            return
+
+        self._wp_go_btn.configure(state=tk.DISABLED)
+        self._wp_status_var.set(f"Probing {url}...")
+
+        # Optionally start Wireshark capture during the probe
+        capture_active = False
+        if self._wp_capture_var.get() and self.capture_monitor and self.capture_monitor.tshark_available:
+            iface = getattr(self, '_cap_iface_var', None)
+            iface_val = iface.get() if iface else ""
+            if iface_val:
+                iface_id = iface_val.split(".")[0].strip() if "." in iface_val else iface_val
+                try:
+                    self.capture_monitor.start_capture(
+                        interface=iface_id, duration=30,
+                        output_dir=self.config.output_dir,
+                        callback=self._on_web_probe_capture_done,
+                    )
+                    capture_active = True
+                    self._wp_status_var.set(f"Probing {url} (with Wireshark capture)...")
+                except Exception:
+                    pass
+
+        follow = self._wp_redirect_var.get()
+
+        def _run():
+            result = self.web_probe.probe(url, follow_redirects=follow)
+            self.root.after(0, lambda: self._display_web_probe(result))
+            # If we started a capture, let it finish on its own
+
+        threading.Thread(target=_run, daemon=True, name="WebProbe").start()
+
+    def _on_web_probe_capture_done(self, analysis) -> None:
+        """Callback when the Wireshark capture during a web probe finishes."""
+        self._capture_analyses.append(analysis)
+        self.root.after(0, lambda: self._display_analysis(analysis))
+        self.root.after(0, lambda: self._log_event(
+            "INFO", "Web Probe Capture",
+            f"Capture complete: {analysis.total_packets} packets, {analysis.severity}"
+        ))
+
+    def _display_web_probe(self, result: WebProbeResult) -> None:
+        """Display web probe results in the UI."""
+        self._wp_go_btn.configure(state=tk.NORMAL)
+
+        if result.error:
+            self._wp_status_var.set(f"Error: {result.error}")
+        else:
+            self._wp_status_var.set(
+                f"Done — {result.total_ms:.0f}ms total | "
+                f"HTTP {result.status_code} | Bottleneck: {result.bottleneck}"
+            )
+
+        # ----- Draw waterfall timing chart -----
+        self._draw_web_waterfall(result)
+
+        # ----- DNS comparison table -----
+        for item in self._wp_dns_tree.get_children():
+            self._wp_dns_tree.delete(item)
+        for dns in result.dns_comparisons:
+            time_str = f"{dns.time_ms:.0f}" if dns.time_ms >= 0 else "—"
+            status = dns.error if dns.error else "OK"
+            server = dns.resolver_ip if dns.resolver_ip else "(system)"
+            self._wp_dns_tree.insert("", tk.END, values=(
+                dns.resolver_name, server, dns.resolved_ip,
+                time_str, status
+            ))
+
+        # ----- Diagnosis text -----
+        self._wp_diag_text.configure(state=tk.NORMAL)
+        self._wp_diag_text.delete("1.0", tk.END)
+
+        self._wp_diag_text.insert(tk.END,
+            f"URL: {result.url}\n"
+            f"Resolved IP: {result.resolved_ip}   |   "
+            f"HTTP {result.status_code} {result.status_reason}   |   "
+            f"Size: {result.content_length / 1024:.1f} KB\n\n",
+            "header"
+        )
+
+        for diag in result.diagnosis:
+            if "CRITICAL" in diag or "FATAL" in diag:
+                tag = "critical"
+            elif "WARNING" in diag:
+                tag = "warning"
+            elif "INFO" in diag:
+                tag = "info"
+            else:
+                tag = "ok"
+            self._wp_diag_text.insert(tk.END, f"  • {diag}\n", tag)
+
+        self._wp_diag_text.configure(state=tk.DISABLED)
+
+        # ----- Add to history -----
+        def _fmt(ms):
+            return f"{ms:.0f}ms" if ms >= 0 else "—"
+
+        self._wp_hist_tree.insert("", 0, values=(
+            result.timestamp.strftime("%H:%M:%S"),
+            result.url[:60],
+            _fmt(result.dns_ms), _fmt(result.tcp_connect_ms),
+            _fmt(result.tls_handshake_ms), _fmt(result.ttfb_ms),
+            _fmt(result.download_ms), _fmt(result.total_ms),
+            str(result.status_code) if result.status_code else "ERR",
+        ))
+
+        # Log to event log
+        self._log_event(
+            "WARNING" if result.total_ms > 1000 else "INFO",
+            "Web Probe",
+            f"{result.url} — {result.total_ms:.0f}ms total, "
+            f"bottleneck={result.bottleneck}"
+        )
+
+    def _draw_web_waterfall(self, result: WebProbeResult) -> None:
+        """Draw a horizontal waterfall bar chart of probe phase timings."""
+        canvas = self._wp_waterfall
+        canvas.delete("all")
+
+        w = canvas.winfo_width() or 800
+        h = canvas.winfo_height() or 160
+
+        phases = [
+            ("DNS Resolution", result.dns_ms, "#89b4fa"),
+            ("TCP Connect", result.tcp_connect_ms, "#94e2d5"),
+            ("TLS Handshake", result.tls_handshake_ms, "#cba6f7"),
+            ("TTFB (Server)", result.ttfb_ms, "#f9e2af"),
+            ("Download", result.download_ms, "#a6e3a1"),
+        ]
+
+        # Filter out skipped phases
+        active = [(name, ms, color) for name, ms, color in phases if ms > 0]
+        if not active:
+            canvas.create_text(w / 2, h / 2, text="No timing data",
+                                fill=COLORS["fg_dim"], font=("Segoe UI", 12))
+            return
+
+        total = sum(ms for _, ms, _ in active)
+        if total <= 0:
+            return
+
+        label_w = 130  # pixels for labels on the left
+        bar_area = w - label_w - 80  # leave room for ms label on right
+        bar_h = min(22, (h - 20) / max(len(active), 1) - 4)
+        y_start = 10
+
+        for i, (name, ms, color) in enumerate(active):
+            y = y_start + i * (bar_h + 6)
+            bar_w = max(4, (ms / total) * bar_area)
+
+            # Phase label
+            canvas.create_text(
+                label_w - 5, y + bar_h / 2,
+                text=name, anchor=tk.E, fill=COLORS["fg"],
+                font=("Segoe UI", 9)
+            )
+
+            # Bar
+            is_bottleneck = name == result.bottleneck
+            outline = COLORS["red"] if is_bottleneck else ""
+            bar_width = 2 if is_bottleneck else 0
+            canvas.create_rectangle(
+                label_w, y, label_w + bar_w, y + bar_h,
+                fill=color, outline=outline, width=bar_width
+            )
+
+            # Time label
+            label_color = COLORS["red"] if is_bottleneck else COLORS["fg_dim"]
+            suffix = " ◄ BOTTLENECK" if is_bottleneck else ""
+            canvas.create_text(
+                label_w + bar_w + 5, y + bar_h / 2,
+                text=f"{ms:.0f}ms{suffix}", anchor=tk.W,
+                fill=label_color, font=("Consolas", 9, "bold" if is_bottleneck else "")
+            )
+
+        # Total at the bottom
+        ty = y_start + len(active) * (bar_h + 6) + 4
+        canvas.create_text(
+            label_w, ty, text=f"Total: {result.total_ms:.0f}ms",
+            anchor=tk.W, fill=COLORS["fg"],
+            font=("Segoe UI", 10, "bold")
+        )
+
+    # --- Tab 8: Event Log ---
 
     def _build_log_tab(self) -> None:
         """Build the scrollable spike/anomaly event log."""

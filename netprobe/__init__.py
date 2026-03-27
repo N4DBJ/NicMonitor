@@ -7,6 +7,14 @@ monitors connections via netstat, and tracks per-process network activity
 to help troubleshoot random network errors and latency spikes.
 
 Version History:
+    1.5.0 (2026-03-27) - Web Probe & URL Load Analyser
+        - New Web Probe tab: per-phase URL load timing (DNS, TCP, TLS, TTFB, download)
+        - Visual waterfall chart highlighting the bottleneck phase
+        - Multi-resolver DNS comparison (System vs Google vs Cloudflare vs Quad9)
+        - Automatic diagnosis with severity-rated findings
+        - Optional Wireshark capture during probes
+        - Probe history table for comparing attempts
+
     1.4.0 (2026-03-24) - Report Charts & Event Log Correlation
         - Inline SVG latency chart embedded in HTML reports
         - Windows Event Log cross-referencing: queries System & Application
@@ -58,5 +66,5 @@ Author: NetProbe Contributors
 License: MIT
 """
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 __app_name__ = "NetProbe"
