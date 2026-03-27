@@ -161,7 +161,54 @@ class WebProbeResult:
             )
 
         # Download
-        if self.download_ms > 2000:
+        if self.download_ms > 0 and self.content_length > 0:
+            speed_kbps = (self.content_length / 1024) / (self.download_ms / 1000)
+            speed_mbps = (self.content_length * 8) / (self.download_ms / 1000) / 1_000_000
+            encoding = self.response_headers.get("content-encoding", "none")
+            content_type = self.response_headers.get("content-type", "unknown")
+            transfer = self.response_headers.get("transfer-encoding", "")
+
+            self.diagnosis.append(
+                f"INFO: Downloaded {self.content_length / 1024:.0f} KB in "
+                f"{self.download_ms:.0f}ms ({speed_kbps:.0f} KB/s ≈ {speed_mbps:.2f} Mbps)"
+            )
+            self.diagnosis.append(
+                f"INFO: Content-Type: {content_type}  |  "
+                f"Encoding: {encoding}  |  Transfer: {transfer or 'standard'}"
+            )
+
+            if encoding == "none" and self.content_length > 50_000:
+                self.diagnosis.append(
+                    f"WARNING: Server is NOT using compression (no gzip/br) "
+                    f"for {self.content_length / 1024:.0f} KB response — "
+                    f"compressed transfer would be much faster"
+                )
+
+            if self.download_ms > 2000:
+                self.diagnosis.append(
+                    f"WARNING: Download phase is slow ({self.download_ms:.0f}ms). "
+                    f"Possible causes:"
+                )
+                self.diagnosis.append(
+                    f"  → Large page ({self.content_length / 1024:.0f} KB) — "
+                    f"Amazon product pages are often 500+ KB of HTML"
+                )
+                if speed_mbps < 1:
+                    self.diagnosis.append(
+                        f"  → Low throughput ({speed_mbps:.2f} Mbps) — "
+                        f"check for packet loss, TCP retransmissions, "
+                        f"or bandwidth throttling"
+                    )
+                self.diagnosis.append(
+                    f"  → Enable Wireshark capture to check for TCP retransmissions "
+                    f"and window size issues during download"
+                )
+            elif self.download_ms > 500:
+                self.diagnosis.append(
+                    f"INFO: Download speed {speed_kbps:.0f} KB/s — "
+                    f"moderate; large pages will feel slow at this rate"
+                )
+        elif self.download_ms > 2000:
             self.diagnosis.append(
                 f"INFO: Content download took {self.download_ms:.0f}ms "
                 f"({self.content_length / 1024:.0f} KB)"
@@ -194,6 +241,77 @@ class WebProbeResult:
 
         if not self.diagnosis:
             self.diagnosis.append("OK: All phases within normal ranges")
+
+        # Add bottleneck-specific recommendations
+        if self.bottleneck and not self.error:
+            self.diagnosis.append("")
+            self.diagnosis.append(f"=== Bottleneck: {self.bottleneck} ===")
+            if self.bottleneck == "DNS Resolution":
+                self.diagnosis.append(
+                    "FIX: Check the DNS Resolver Comparison table above. If "
+                    "alternative resolvers are faster, change your DNS settings "
+                    "(router or adapter) to use 1.1.1.1 or 8.8.8.8. Your "
+                    "router's firewall or DNS filtering may be adding latency."
+                )
+            elif self.bottleneck == "TCP Connect":
+                self.diagnosis.append(
+                    "FIX: TCP connect time depends on distance to the server, "
+                    "network congestion, and firewall inspection. Try: check "
+                    "your local firewall rules, test from a different network, "
+                    "or use traceroute to find where the delay occurs."
+                )
+            elif self.bottleneck == "TLS Handshake":
+                self.diagnosis.append(
+                    "FIX: TLS time depends on cipher negotiation and certificate "
+                    "verification. Possible causes: slow OCSP/CRL checks, "
+                    "antivirus SSL inspection, or VPN overhead. Try disabling "
+                    "AV SSL scanning temporarily to test."
+                )
+            elif self.bottleneck == "TTFB":
+                self.diagnosis.append(
+                    "FIX: TTFB is the server processing time — this is mostly "
+                    "server-side. A busy server, slow database, or geographic "
+                    "distance can cause this. CDN-served sites should have "
+                    "low TTFB. Try at different times of day to compare."
+                )
+            elif self.bottleneck == "Download":
+                self.diagnosis.append(
+                    "FIX: Slow download means the data transfer itself is the "
+                    "bottleneck. This can be caused by:\n"
+                    "  1. Large page size (Amazon pages are often 500KB+)\n"
+                    "  2. TCP retransmissions / packet loss on your connection\n"
+                    "  3. Server-side throttling or rate limiting\n"
+                    "  4. No compression (check Content-Encoding above)\n"
+                    "  5. Your ISP or router throttling specific traffic\n"
+                    "ACTION: Enable 'Capture with Wireshark' and re-probe. "
+                    "Look for TCP retransmissions in the Wireshark tab — if "
+                    "you see many, it confirms packet loss during transfer."
+                )
+
+        # Phase glossary
+        self.diagnosis.append("")
+        self.diagnosis.append("=== What each phase means ===")
+        self.diagnosis.append(
+            "DNS Resolution — Converting the hostname to an IP address via "
+            "your configured DNS server."
+        )
+        self.diagnosis.append(
+            "TCP Connect — Opening a raw network connection (SYN → SYN-ACK "
+            "→ ACK). Measures round-trip latency to the server."
+        )
+        self.diagnosis.append(
+            "TLS Handshake — Negotiating encryption (certificate exchange, "
+            "cipher agreement). Only for HTTPS URLs."
+        )
+        self.diagnosis.append(
+            "TTFB (Time To First Byte) — Time from sending the HTTP request "
+            "to receiving the first byte of the response. Reflects server "
+            "processing time plus network latency."
+        )
+        self.diagnosis.append(
+            "Download — Time to transfer the full response body. Depends on "
+            "page size, compression, connection speed, and packet loss."
+        )
 
 
 # ---------------------------------------------------------------------------

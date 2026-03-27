@@ -1070,7 +1070,10 @@ class NetProbeGUI:
             f"URL: {result.url}\n"
             f"Resolved IP: {result.resolved_ip}   |   "
             f"HTTP {result.status_code} {result.status_reason}   |   "
-            f"Size: {result.content_length / 1024:.1f} KB\n\n",
+            f"Size: {result.content_length / 1024:.1f} KB\n"
+            f"Server: {result.response_headers.get('server', 'N/A')}   |   "
+            f"Content-Type: {result.response_headers.get('content-type', 'N/A')}   |   "
+            f"Encoding: {result.response_headers.get('content-encoding', 'none')}\n\n",
             "header"
         )
 
@@ -1081,9 +1084,19 @@ class NetProbeGUI:
                 tag = "warning"
             elif "INFO" in diag:
                 tag = "info"
+            elif diag.startswith("FIX:") or diag.startswith("ACTION:"):
+                tag = "warning"
+            elif diag.startswith("==="):
+                tag = "header"
             else:
                 tag = "ok"
-            self._wp_diag_text.insert(tk.END, f"  • {diag}\n", tag)
+            # Use bullet for normal lines, no bullet for headers/indented
+            if diag.startswith("===") or diag.startswith("  "):
+                self._wp_diag_text.insert(tk.END, f"  {diag}\n", tag)
+            elif diag == "":
+                self._wp_diag_text.insert(tk.END, "\n", tag)
+            else:
+                self._wp_diag_text.insert(tk.END, f"  • {diag}\n", tag)
 
         self._wp_diag_text.configure(state=tk.DISABLED)
 
