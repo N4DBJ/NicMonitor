@@ -1032,27 +1032,41 @@ class NetProbeGUI:
             # Start Wireshark capture AFTER probe so we have the resolved IP
             # for a targeted BPF filter — capture post-probe traffic too
             if want_capture and result.resolved_ip:
-                iface = getattr(self, '_cap_iface_var', None)
-                iface_val = iface.get() if iface else ""
-                if iface_val:
-                    iface_id = (
-                        iface_val.split(".")[0].strip()
-                        if "." in iface_val else iface_val
-                    )
+                iface_val = self._cap_iface_var.get()
+                if iface_val and iface_val != "No interfaces found":
+                    # Interface format is "ID: Description" (colon-separated)
+                    iface_id = iface_val.split(":")[0].strip()
+
+                    if self.capture_monitor.is_capturing:
+                        self.root.after(0, lambda: self._wp_status_var.set(
+                            "Cannot capture — another capture is already running"
+                        ))
+                        self.root.after(0, lambda: self._log_event(
+                            "WARNING", "Web Probe",
+                            "Wireshark capture skipped: another capture in progress"
+                        ))
+                        return
+
+                    bpf = f"host {result.resolved_ip}"
                     self.root.after(0, lambda: self._wp_status_var.set(
                         f"Done — now capturing traffic to {result.resolved_ip} "
                         f"for 15s via Wireshark..."
+                    ))
+                    self.root.after(0, lambda: self._log_event(
+                        "INFO", "Web Probe",
+                        f"Starting Wireshark capture: iface={iface_id}, "
+                        f"filter='{bpf}'"
                     ))
                     try:
                         self.capture_monitor.start_capture(
                             interface=iface_id, duration=15,
                             output_dir=self.config.output_dir,
-                            capture_filter=f"host {result.resolved_ip}",
+                            capture_filter=bpf,
                             callback=self._on_web_probe_capture_done,
                         )
                         # Do a second probe during the capture window
                         import time as _time
-                        _time.sleep(1)
+                        _time.sleep(2)
                         result2 = self.web_probe.probe(
                             url, follow_redirects=follow,
                             skip_alt_dns=True,
@@ -1067,6 +1081,18 @@ class NetProbeGUI:
                         self.root.after(0, lambda: self._wp_status_var.set(
                             f"Capture failed: {exc}"
                         ))
+                        self.root.after(0, lambda: self._log_event(
+                            "WARNING", "Web Probe",
+                            f"Wireshark capture failed: {exc}"
+                        ))
+                else:
+                    self.root.after(0, lambda: self._wp_status_var.set(
+                        "Wireshark checked but no interface selected on Wireshark tab"
+                    ))
+                    self.root.after(0, lambda: self._log_event(
+                        "WARNING", "Web Probe",
+                        "Wireshark capture skipped: no interface selected"
+                    ))
 
         threading.Thread(target=_run, daemon=True, name="WebProbe").start()
 
