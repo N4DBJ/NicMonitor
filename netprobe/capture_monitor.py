@@ -307,6 +307,7 @@ class CaptureMonitor:
         duration: int = 30,
         output_dir: str = "",
         callback: Optional[Callable[[CaptureAnalysis], None]] = None,
+        capture_filter: str = "",
     ) -> None:
         """
         Start a live packet capture in a background thread.
@@ -316,6 +317,7 @@ class CaptureMonitor:
             duration: Capture duration in seconds
             output_dir: Directory to save pcap file (default: CWD)
             callback: Called with CaptureAnalysis when capture+analysis is done
+            capture_filter: BPF filter expression (e.g. 'host 1.2.3.4')
         """
         if self._capturing:
             logger.warning("Capture already in progress")
@@ -330,7 +332,7 @@ class CaptureMonitor:
         self._capturing = True
         self._capture_thread = threading.Thread(
             target=self._capture_and_analyse,
-            args=(interface, duration, output_dir, callback),
+            args=(interface, duration, output_dir, callback, capture_filter),
             daemon=True,
             name="CaptureMonitor",
         )
@@ -391,6 +393,7 @@ class CaptureMonitor:
         duration: int,
         output_dir: str,
         callback: Optional[Callable],
+        capture_filter: str = "",
     ) -> None:
         """Background thread: capture → analyse → callback."""
         try:
@@ -413,6 +416,8 @@ class CaptureMonitor:
                 "-a", f"duration:{duration}",
                 "-w", pcap_path,
             ]
+            if capture_filter:
+                cmd.extend(["-f", capture_filter])
 
             self._capture_process = subprocess.Popen(
                 cmd,

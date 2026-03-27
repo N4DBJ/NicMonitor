@@ -907,9 +907,22 @@ class NetProbeGUI:
         ttk.Checkbutton(row2, text="Follow redirects",
                          variable=self._wp_redirect_var).pack(side=tk.LEFT, padx=(0, 15))
 
+        self._wp_skip_alt_dns_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row2, text="Skip alt-DNS comparison",
+                         variable=self._wp_skip_alt_dns_var).pack(side=tk.LEFT, padx=(0, 15))
+
+        self._wp_save_btn = ttk.Button(
+            row2, text="💾 Save Results",
+            command=self._save_web_probe_results, state=tk.DISABLED
+        )
+        self._wp_save_btn.pack(side=tk.RIGHT, padx=(5, 0))
+
         self._wp_status_var = tk.StringVar(value="Enter a URL and click Go")
         ttk.Label(row2, textvariable=self._wp_status_var, style="Dim.TLabel").pack(
             side=tk.RIGHT, padx=5)
+
+        # Store last probe result for saving
+        self._wp_last_result: Optional[WebProbeResult] = None
 
         # ----- Timing breakdown -----
         timing_frame = ttk.LabelFrame(tab, text="  Timing Breakdown  ")
@@ -999,30 +1012,61 @@ class NetProbeGUI:
         self._wp_go_btn.configure(state=tk.DISABLED)
         self._wp_status_var.set(f"Probing {url}...")
 
-        # Optionally start Wireshark capture during the probe
-        capture_active = False
-        if self._wp_capture_var.get() and self.capture_monitor and self.capture_monitor.tshark_available:
-            iface = getattr(self, '_cap_iface_var', None)
-            iface_val = iface.get() if iface else ""
-            if iface_val:
-                iface_id = iface_val.split(".")[0].strip() if "." in iface_val else iface_val
-                try:
-                    self.capture_monitor.start_capture(
-                        interface=iface_id, duration=30,
-                        output_dir=self.config.output_dir,
-                        callback=self._on_web_probe_capture_done,
-                    )
-                    capture_active = True
-                    self._wp_status_var.set(f"Probing {url} (with Wireshark capture)...")
-                except Exception:
-                    pass
-
         follow = self._wp_redirect_var.get()
+        skip_alt_dns = self._wp_skip_alt_dns_var.get()
+
+        # We need the resolved IP for the capture filter, so probe first,
+        # then optionally capture with a host filter
+        want_capture = (
+            self._wp_capture_var.get()
+            and self.capture_monitor
+            and self.capture_monitor.tshark_available
+        )
 
         def _run():
-            result = self.web_probe.probe(url, follow_redirects=follow)
+            result = self.web_probe.probe(
+                url, follow_redirects=follow, skip_alt_dns=skip_alt_dns
+            )
             self.root.after(0, lambda: self._display_web_probe(result))
-            # If we started a capture, let it finish on its own
+
+            # Start Wireshark capture AFTER probe so we have the resolved IP
+            # for a targeted BPF filter — capture post-probe traffic too
+            if want_capture and result.resolved_ip:
+                iface = getattr(self, '_cap_iface_var', None)
+                iface_val = iface.get() if iface else ""
+                if iface_val:
+                    iface_id = (
+                        iface_val.split(".")[0].strip()
+                        if "." in iface_val else iface_val
+                    )
+                    self.root.after(0, lambda: self._wp_status_var.set(
+                        f"Done — now capturing traffic to {result.resolved_ip} "
+                        f"for 15s via Wireshark..."
+                    ))
+                    try:
+                        self.capture_monitor.start_capture(
+                            interface=iface_id, duration=15,
+                            output_dir=self.config.output_dir,
+                            capture_filter=f"host {result.resolved_ip}",
+                            callback=self._on_web_probe_capture_done,
+                        )
+                        # Do a second probe during the capture window
+                        import time as _time
+                        _time.sleep(1)
+                        result2 = self.web_probe.probe(
+                            url, follow_redirects=follow,
+                            skip_alt_dns=True,
+                        )
+                        self.root.after(0, lambda: self._display_web_probe(result2))
+                        self.root.after(0, lambda: self._log_event(
+                            "INFO", "Web Probe",
+                            f"Re-probed {url} under Wireshark capture — "
+                            f"{result2.total_ms:.0f}ms"
+                        ))
+                    except Exception as exc:
+                        self.root.after(0, lambda: self._wp_status_var.set(
+                            f"Capture failed: {exc}"
+                        ))
 
         threading.Thread(target=_run, daemon=True, name="WebProbe").start()
 
@@ -1030,14 +1074,167 @@ class NetProbeGUI:
         """Callback when the Wireshark capture during a web probe finishes."""
         self._capture_analyses.append(analysis)
         self.root.after(0, lambda: self._display_analysis(analysis))
+
+        # Build a summary and append to the diagnosis text
+        summary_lines = [
+            "",
+            "=== Wireshark Capture Results ===",
+            f"INFO: {analysis.total_packets} packets captured in "
+            f"{analysis.capture_duration_sec}s",
+        ]
+        if analysis.tcp_retransmissions:
+            summary_lines.append(
+                f"WARNING: {analysis.tcp_retransmissions} TCP retransmissions detected"
+            )
+        if analysis.tcp_duplicate_acks:
+            summary_lines.append(
+                f"WARNING: {analysis.tcp_duplicate_acks} duplicate ACKs "
+                f"(possible packet loss)"
+            )
+        if analysis.tcp_zero_window:
+            summary_lines.append(
+                f"WARNING: {analysis.tcp_zero_window} TCP zero-window events "
+                f"(receiver buffer full)"
+            )
+        if analysis.tcp_out_of_order:
+            summary_lines.append(
+                f"INFO: {analysis.tcp_out_of_order} out-of-order packets"
+            )
+        if analysis.tcp_resets:
+            summary_lines.append(
+                f"INFO: {analysis.tcp_resets} connection resets (RST)"
+            )
+        if not any([analysis.tcp_retransmissions, analysis.tcp_duplicate_acks,
+                    analysis.tcp_zero_window]):
+            summary_lines.append(
+                "OK: No TCP problems detected — connection is clean"
+            )
+        for prob in analysis.problems:
+            if prob not in str(summary_lines):
+                summary_lines.append(f"  → {prob}")
+
+        def _append_capture():
+            self._wp_diag_text.configure(state=tk.NORMAL)
+            for line in summary_lines:
+                if "CRITICAL" in line or "FATAL" in line:
+                    tag = "critical"
+                elif "WARNING" in line:
+                    tag = "warning"
+                elif "INFO" in line:
+                    tag = "info"
+                elif line.startswith("==="):
+                    tag = "header"
+                else:
+                    tag = "ok"
+                if line.startswith("===") or line.startswith("  "):
+                    self._wp_diag_text.insert(tk.END, f"  {line}\n", tag)
+                elif line == "":
+                    self._wp_diag_text.insert(tk.END, "\n", tag)
+                else:
+                    self._wp_diag_text.insert(tk.END, f"  • {line}\n", tag)
+            self._wp_diag_text.configure(state=tk.DISABLED)
+            self._wp_status_var.set(
+                f"Capture complete — {analysis.total_packets} packets, "
+                f"severity: {analysis.severity}"
+            )
+
+        self.root.after(0, _append_capture)
         self.root.after(0, lambda: self._log_event(
             "INFO", "Web Probe Capture",
             f"Capture complete: {analysis.total_packets} packets, {analysis.severity}"
         ))
 
+    def _save_web_probe_results(self) -> None:
+        """Save last Web Probe results to a text file for sharing/upload."""
+        result = self._wp_last_result
+        if not result:
+            return
+
+        from tkinter import filedialog as _fd
+        path = _fd.asksaveasfilename(
+            initialdir=os.getcwd(),
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            title="Save Web Probe Results",
+            initialfile=f"webprobe_{result.hostname}_{result.timestamp.strftime('%Y%m%d_%H%M%S')}.txt",
+        )
+        if not path:
+            return
+
+        lines = []
+        lines.append(f"NetProbe Web Probe Results")
+        lines.append(f"=========================")
+        lines.append(f"Timestamp:  {result.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append(f"URL:        {result.url}")
+        lines.append(f"Resolved:   {result.resolved_ip}")
+        lines.append(f"HTTP:       {result.status_code} {result.status_reason}")
+        lines.append(f"Size:       {result.content_length / 1024:.1f} KB")
+        lines.append(f"")
+        lines.append(f"Timing Breakdown")
+        lines.append(f"----------------")
+        lines.append(f"DNS Resolution:  {result.dns_ms:.1f}ms")
+        lines.append(f"TCP Connect:     {result.tcp_connect_ms:.1f}ms")
+        lines.append(f"TLS Handshake:   {result.tls_handshake_ms:.1f}ms")
+        lines.append(f"TTFB:            {result.ttfb_ms:.1f}ms")
+        lines.append(f"Download:        {result.download_ms:.1f}ms")
+        lines.append(f"Total:           {result.total_ms:.1f}ms")
+        lines.append(f"Bottleneck:      {result.bottleneck}")
+        lines.append(f"")
+
+        # Response headers
+        lines.append(f"Response Headers")
+        lines.append(f"----------------")
+        for k, v in result.response_headers.items():
+            lines.append(f"{k}: {v}")
+        lines.append(f"")
+
+        # DNS comparisons
+        lines.append(f"DNS Resolver Comparison")
+        lines.append(f"-----------------------")
+        for dns in result.dns_comparisons:
+            time_str = f"{dns.time_ms:.0f}ms" if dns.time_ms >= 0 else "failed"
+            err = f" ({dns.error})" if dns.error else ""
+            lines.append(
+                f"  {dns.resolver_name:<20} {dns.resolver_ip or '(system)':<16} "
+                f"→ {dns.resolved_ip:<16} {time_str}{err}"
+            )
+        lines.append(f"")
+
+        # Diagnosis
+        lines.append(f"Diagnosis")
+        lines.append(f"---------")
+        for diag in result.diagnosis:
+            lines.append(diag)
+        lines.append(f"")
+
+        # Also grab any Wireshark text currently in the diagnosis widget
+        diag_content = self._wp_diag_text.get("1.0", tk.END).strip()
+        if "Wireshark Capture Results" in diag_content:
+            lines.append(f"")
+            # Extract from the Wireshark header onwards
+            idx = diag_content.find("=== Wireshark Capture Results ===")
+            if idx >= 0:
+                lines.append(diag_content[idx:])
+
+        # Probe history
+        lines.append(f"")
+        lines.append(f"Probe History (this session)")
+        lines.append(f"----------------------------")
+        for child in self._wp_hist_tree.get_children():
+            vals = self._wp_hist_tree.item(child, "values")
+            lines.append("  ".join(str(v) for v in vals))
+
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines))
+
+        self._wp_status_var.set(f"Results saved to {os.path.basename(path)}")
+        self._log_event("INFO", "Web Probe", f"Results saved to {path}")
+
     def _display_web_probe(self, result: WebProbeResult) -> None:
         """Display web probe results in the UI."""
         self._wp_go_btn.configure(state=tk.NORMAL)
+        self._wp_last_result = result
+        self._wp_save_btn.configure(state=tk.NORMAL)
 
         if result.error:
             self._wp_status_var.set(f"Error: {result.error}")

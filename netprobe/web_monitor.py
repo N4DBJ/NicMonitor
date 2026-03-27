@@ -395,6 +395,7 @@ class WebProbeMonitor:
         timeout: float = 15.0,
         follow_redirects: bool = True,
         max_redirects: int = 5,
+        skip_alt_dns: bool = False,
     ) -> WebProbeResult:
         """
         Execute a full URL probe with timing breakdown.
@@ -438,30 +439,31 @@ class WebProbeMonitor:
             return result
 
         # Compare against alternative DNS servers (in parallel)
-        alt_servers = [
-            ("8.8.8.8", "Google DNS"),
-            ("1.1.1.1", "Cloudflare DNS"),
-            ("9.9.9.9", "Quad9 DNS"),
-        ]
-        alt_threads: List[threading.Thread] = []
-        alt_results: List[DnsComparison] = []
-        alt_lock = threading.Lock()
+        if not skip_alt_dns:
+            alt_servers = [
+                ("8.8.8.8", "Google DNS"),
+                ("1.1.1.1", "Cloudflare DNS"),
+                ("9.9.9.9", "Quad9 DNS"),
+            ]
+            alt_threads: List[threading.Thread] = []
+            alt_results: List[DnsComparison] = []
+            alt_lock = threading.Lock()
 
-        def _alt_resolve(server, name):
-            comp = _resolve_via_nslookup(result.hostname, server, name)
-            with alt_lock:
-                alt_results.append(comp)
+            def _alt_resolve(server, name):
+                comp = _resolve_via_nslookup(result.hostname, server, name)
+                with alt_lock:
+                    alt_results.append(comp)
 
-        for server, name in alt_servers:
-            t = threading.Thread(target=_alt_resolve, args=(server, name), daemon=True)
-            t.start()
-            alt_threads.append(t)
+            for server, name in alt_servers:
+                t = threading.Thread(target=_alt_resolve, args=(server, name), daemon=True)
+                t.start()
+                alt_threads.append(t)
 
-        # Don't wait too long for comparisons
-        for t in alt_threads:
-            t.join(timeout=12)
+            # Don't wait too long for comparisons
+            for t in alt_threads:
+                t.join(timeout=12)
 
-        result.dns_comparisons.extend(sorted(alt_results, key=lambda d: d.time_ms if d.time_ms >= 0 else 99999))
+            result.dns_comparisons.extend(sorted(alt_results, key=lambda d: d.time_ms if d.time_ms >= 0 else 99999))
 
         # --- Phase 2-5: HTTP connection with per-phase timing ---
         try:
