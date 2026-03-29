@@ -1,4 +1,4 @@
-# NetProbe v1.5.0
+# NetProbe v1.6.0
 
 **Windows Network Latency Monitor** — A comprehensive diagnostic tool with a full GUI dashboard that measures network latency over time, similar to WinMTR, to help troubleshoot random network errors and latency spikes.
 
@@ -7,7 +7,7 @@
 ### GUI Dashboard
 - **Dark-themed graphical interface** — Professional dark UI built with tkinter (no extra dependencies)
 - **Live scrolling latency chart** — Canvas-based time-series graph with spike markers, threshold line, and timeout indicators
-- **9 tabbed panels** — Latency, Traceroute, Connections, Processes, NIC Health, Wireshark, Web Probe, Event Log, and Settings
+- **9 tabbed panels** — Latency, Traceroute, Connections, Processes, NIC Health, Wireshark, Web Probe, Browser Compare, Event Log, and Settings
 - **Real-time stat cards** — Per-target latency stats updated live
 - **Point-and-click configuration** — All settings adjustable in the Settings tab, with save/load config
 
@@ -30,11 +30,23 @@
 ### Web Probe — URL Load Analyser (v1.5.0)
 - **Per-phase timing breakdown** — Measures DNS resolution, TCP connect, TLS handshake, time-to-first-byte (TTFB), and content download individually
 - **Visual waterfall chart** — Color-coded horizontal bar chart highlighting the bottleneck phase
-- **Multi-resolver DNS comparison** — Tests your system DNS against Google (8.8.8.8), Cloudflare (1.1.1.1), and Quad9 (9.9.9.9) to identify DNS-specific delays
-- **Automatic bottleneck detection** — Pinpoints which phase is causing slowness with severity-rated diagnosis
-- **Wireshark integration** — Optional packet capture during the probe for deep-dive analysis
+- **Transfer speed gauge** — Large red/yellow/green speed readout (Mbps) on the waterfall chart with FAST/MODERATE/SLOW rating
+- **Multi-resolver DNS comparison** — Tests your system DNS against Google (8.8.8.8), Cloudflare (1.1.1.1), and Quad9 (9.9.9.9) with optional skip checkbox
+- **Automatic bottleneck detection** — Per-phase diagnosis with download speed calculation, compression check, and actionable fix recommendations
+- **Wireshark integration** — Packet capture during probe with BPF host filter, auto re-probe under capture, and TCP retransmission/dup-ACK results appended to diagnosis
 - **Probe history** — Tracks all probes in a sortable table for comparison across attempts
+- **Save results** — Export full diagnosis, headers, DNS comparison, and Wireshark results to a shareable text file
 - **Redirect following** — Automatically follows HTTP redirects with timing for the final destination
+
+### Browser Compare — Chrome vs Firefox vs Edge (v1.6.0)
+- **Multi-browser URL probing** — Tests the same URL with Chrome, Firefox, Edge, and Raw user-agent identities simultaneously
+- **curl.exe based** — Uses Windows' built-in curl with real browser headers (Accept, Accept-Encoding, Sec-Fetch-*) for accurate CDN behavior
+- **Stacked timing chart** — Side-by-side color-coded phase bars per browser with fastest-browser star marker
+- **Speed gauges** — Per-browser red/yellow/green Mbps rating
+- **Content comparison** — Detects when CDNs serve different page sizes, compression, or content per User-Agent
+- **Protocol reporting** — Shows negotiated HTTP version (1.1/2/3) per browser
+- **Automatic analysis** — Highlights timing differences, compression variations, server behavior per browser identity
+- **Save results** — Export full comparison table and analysis to text file
 
 ### Report Charts & Event Log Correlation (v1.4.0)
 - **SVG latency charts in reports** — Inline SVG graphs embedded directly in the HTML report, mirroring the live GUI chart with spike markers, threshold line, and average overlay
