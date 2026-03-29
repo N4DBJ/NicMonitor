@@ -7,6 +7,15 @@ monitors connections via netstat, and tracks per-process network activity
 to help troubleshoot random network errors and latency spikes.
 
 Version History:
+    1.6.0 (2026-03-29) - Browser Compare
+        - New Browser Compare tab: probe URLs as Chrome, Firefox, Edge
+        - Side-by-side timing comparison with stacked phase bar chart
+        - Transfer speed gauges with red/yellow/green ratings
+        - Content size and compression comparison across browsers
+        - Automatic analysis of per-browser server behavior differences
+        - curl.exe based probing (no extra dependencies)
+        - Save comparison results for sharing
+
     1.5.0 (2026-03-27) - Web Probe & URL Load Analyser
         - New Web Probe tab: per-phase URL load timing (DNS, TCP, TLS, TTFB, download)
         - Visual waterfall chart highlighting the bottleneck phase
@@ -66,5 +75,5 @@ Author: NetProbe Contributors
 License: MIT
 """
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 __app_name__ = "NetProbe"

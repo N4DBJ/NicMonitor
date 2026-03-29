@@ -46,6 +46,7 @@ from netprobe.reporter import Reporter
 from netprobe.nic_monitor import NicMonitor
 from netprobe.capture_monitor import CaptureMonitor
 from netprobe.web_monitor import WebProbeMonitor, WebProbeResult
+from netprobe.browser_probe import BrowserProbeMonitor, BrowserCompareResult, BROWSER_PROFILES
 
 logger = logging.getLogger("netprobe.gui")
 
@@ -132,6 +133,9 @@ class NetProbeGUI:
 
         # v1.5.0: Web Probe monitor
         self.web_probe: WebProbeMonitor = WebProbeMonitor()
+
+        # v1.6.0: Browser Compare monitor
+        self.browser_probe: BrowserProbeMonitor = BrowserProbeMonitor()
 
         # Wireshark capture analysis results collected during the session
         self._capture_analyses: list = []
@@ -316,7 +320,10 @@ class NetProbeGUI:
         # Tab 7: Web Probe (URL load timing & DNS diagnostics)
         self._build_web_probe_tab()
 
-        # Tab 8: Event Log (spikes & anomalies)
+        # Tab 8: Browser Compare (Chrome vs Firefox vs Edge)
+        self._build_browser_compare_tab()
+
+        # Tab 9: Event Log (spikes & anomalies)
         self._build_log_tab()
 
         # Tab 9: Settings
@@ -1481,7 +1488,420 @@ class NetProbeGUI:
                 font=("Consolas", 8)
             )
 
-    # --- Tab 8: Event Log ---
+    # --- Tab 8: Browser Compare ---
+
+    def _build_browser_compare_tab(self) -> None:
+        """Build the Chrome vs Firefox vs Edge comparison tab."""
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="  🔀 Browser Compare  ")
+
+        # ----- URL input row -----
+        input_frame = ttk.LabelFrame(tab, text="  Compare URL Across Browsers  ")
+        input_frame.pack(fill=tk.X, padx=8, pady=(8, 4))
+
+        row = ttk.Frame(input_frame)
+        row.pack(fill=tk.X, padx=8, pady=6)
+
+        ttk.Label(row, text="URL:").pack(side=tk.LEFT, padx=(0, 5))
+        self._bc_url_var = tk.StringVar(value="https://")
+        self._bc_url_entry = ttk.Entry(
+            row, textvariable=self._bc_url_var, width=55,
+            font=("Consolas", 11)
+        )
+        self._bc_url_entry.pack(side=tk.LEFT, padx=(0, 10), fill=tk.X, expand=True)
+        self._bc_url_entry.bind("<Return>", lambda e: self._on_browser_compare_go())
+
+        self._bc_go_btn = ttk.Button(
+            row, text="▶ Compare", style="Start.TButton",
+            command=self._on_browser_compare_go
+        )
+        self._bc_go_btn.pack(side=tk.LEFT, padx=3)
+
+        # Options row
+        row2 = ttk.Frame(input_frame)
+        row2.pack(fill=tk.X, padx=8, pady=(0, 6))
+
+        self._bc_chrome_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row2, text="Chrome",
+                         variable=self._bc_chrome_var).pack(side=tk.LEFT, padx=(0, 10))
+
+        self._bc_firefox_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row2, text="Firefox",
+                         variable=self._bc_firefox_var).pack(side=tk.LEFT, padx=(0, 10))
+
+        self._bc_edge_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row2, text="Edge",
+                         variable=self._bc_edge_var).pack(side=tk.LEFT, padx=(0, 10))
+
+        self._bc_raw_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row2, text="Raw (no UA)",
+                         variable=self._bc_raw_var).pack(side=tk.LEFT, padx=(0, 10))
+
+        self._bc_redirect_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row2, text="Follow redirects",
+                         variable=self._bc_redirect_var).pack(side=tk.LEFT, padx=(0, 15))
+
+        self._bc_save_btn = ttk.Button(
+            row2, text="💾 Save Results",
+            command=self._save_browser_compare_results, state=tk.DISABLED
+        )
+        self._bc_save_btn.pack(side=tk.RIGHT, padx=(5, 0))
+
+        self._bc_status_var = tk.StringVar(value="Select browsers and click Compare")
+        if not self.browser_probe.curl_available:
+            self._bc_status_var.set("⚠ curl.exe not found — browser compare unavailable")
+        ttk.Label(row2, textvariable=self._bc_status_var, style="Dim.TLabel").pack(
+            side=tk.RIGHT, padx=5)
+
+        # ----- Timing comparison chart -----
+        chart_frame = ttk.LabelFrame(tab, text="  Timing Comparison  ")
+        chart_frame.pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        self._bc_chart = tk.Canvas(
+            chart_frame, height=200, bg=COLORS["bg_secondary"],
+            highlightthickness=0
+        )
+        self._bc_chart.pack(fill=tk.X, padx=8, pady=6)
+
+        # ----- Results table -----
+        table_frame = ttk.LabelFrame(tab, text="  Detailed Results  ")
+        table_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
+
+        cols = (
+            "browser", "http_ver", "dns", "tcp", "tls", "ttfb",
+            "download", "total", "speed", "size", "encoding", "status"
+        )
+        self._bc_tree = ttk.Treeview(
+            table_frame, columns=cols, show="headings", height=5,
+            style="Dark.Treeview"
+        )
+        for col, text, w, anchor in [
+            ("browser",  "Browser",   90, tk.W),
+            ("http_ver", "HTTP",      45, tk.CENTER),
+            ("dns",      "DNS",       60, tk.E),
+            ("tcp",      "TCP",       60, tk.E),
+            ("tls",      "TLS",       60, tk.E),
+            ("ttfb",     "TTFB",      60, tk.E),
+            ("download", "Download",  75, tk.E),
+            ("total",    "Total",     75, tk.E),
+            ("speed",    "Speed",     80, tk.E),
+            ("size",     "Size",      75, tk.E),
+            ("encoding", "Encoding",  70, tk.CENTER),
+            ("status",   "HTTP",      50, tk.CENTER),
+        ]:
+            self._bc_tree.heading(col, text=text)
+            self._bc_tree.column(col, width=w, anchor=anchor)
+        self._bc_tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+
+        # ----- Diagnosis text -----
+        diag_frame = ttk.LabelFrame(tab, text="  Comparison Analysis  ")
+        diag_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        self._bc_diag_text = scrolledtext.ScrolledText(
+            diag_frame, wrap=tk.WORD, font=("Consolas", 10),
+            bg=COLORS["bg_secondary"], fg=COLORS["fg"],
+            insertbackground=COLORS["fg"], selectbackground=COLORS["bg_input"],
+            state=tk.DISABLED, relief=tk.FLAT, borderwidth=0, height=5,
+        )
+        self._bc_diag_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 8))
+        self._bc_diag_text.tag_configure("critical", foreground=COLORS["red"])
+        self._bc_diag_text.tag_configure("warning", foreground=COLORS["yellow"])
+        self._bc_diag_text.tag_configure("info", foreground=COLORS["green"])
+        self._bc_diag_text.tag_configure("ok", foreground=COLORS["green"])
+        self._bc_diag_text.tag_configure("header", foreground=COLORS["accent"],
+                                          font=("Segoe UI", 11, "bold"))
+
+        # Last comparison result for saving
+        self._bc_last_result: Optional[BrowserCompareResult] = None
+
+    def _on_browser_compare_go(self) -> None:
+        """Launch browser comparison probes in a background thread."""
+        url = self._bc_url_var.get().strip()
+        if not url or url == "https://":
+            return
+
+        if not self.browser_probe.curl_available:
+            self._bc_status_var.set("curl.exe not found — cannot run browser compare")
+            return
+
+        # Build list of selected browsers
+        browsers = []
+        if self._bc_chrome_var.get():
+            browsers.append("Chrome")
+        if self._bc_firefox_var.get():
+            browsers.append("Firefox")
+        if self._bc_edge_var.get():
+            browsers.append("Edge")
+        if self._bc_raw_var.get():
+            browsers.append("Raw (no UA)")
+
+        if len(browsers) < 2:
+            self._bc_status_var.set("Select at least 2 browsers to compare")
+            return
+
+        self._bc_go_btn.configure(state=tk.DISABLED)
+        self._bc_status_var.set(f"Probing {url} with {len(browsers)} browsers...")
+
+        follow = self._bc_redirect_var.get()
+
+        def _run():
+            result = self.browser_probe.compare(
+                url, browsers=browsers, follow_redirects=follow
+            )
+            self.root.after(0, lambda: self._display_browser_compare(result))
+
+        threading.Thread(target=_run, daemon=True, name="BrowserCompare").start()
+
+    def _display_browser_compare(self, result: BrowserCompareResult) -> None:
+        """Display browser comparison results."""
+        self._bc_go_btn.configure(state=tk.NORMAL)
+        self._bc_last_result = result
+        self._bc_save_btn.configure(state=tk.NORMAL)
+
+        valid = [p for p in result.probes if not p.error and p.total_ms > 0]
+        if not valid:
+            self._bc_status_var.set("All probes failed — check URL and network")
+        else:
+            fastest = min(valid, key=lambda p: p.total_ms)
+            self._bc_status_var.set(
+                f"Done — {len(valid)}/{len(result.probes)} browsers succeeded | "
+                f"Fastest: {fastest.browser_name} at {fastest.total_ms:.0f}ms"
+            )
+
+        # ----- Draw comparison chart -----
+        self._draw_browser_chart(result)
+
+        # ----- Populate results table -----
+        for item in self._bc_tree.get_children():
+            self._bc_tree.delete(item)
+
+        def _fmt(ms):
+            return f"{ms:.0f}ms" if ms >= 0 else "—"
+
+        for p in result.probes:
+            if p.error:
+                self._bc_tree.insert("", tk.END, values=(
+                    p.browser_name, "—", "—", "—", "—", "—", "—", "—",
+                    "—", "—", "—", f"ERR: {p.error[:20]}"
+                ))
+            else:
+                speed_str = f"{p.speed_mbps:.1f} Mbps" if p.speed_mbps > 0 else "—"
+                size_str = f"{p.content_length / 1024:.0f} KB" if p.content_length > 0 else "—"
+                self._bc_tree.insert("", tk.END, values=(
+                    p.browser_name,
+                    f"{p.http_version}" if p.http_version else "?",
+                    _fmt(p.dns_ms), _fmt(p.tcp_connect_ms),
+                    _fmt(p.tls_handshake_ms), _fmt(p.ttfb_ms),
+                    _fmt(p.download_ms), _fmt(p.total_ms),
+                    speed_str, size_str,
+                    p.content_encoding or "none",
+                    str(p.http_code),
+                ))
+
+        # ----- Diagnosis text -----
+        self._bc_diag_text.configure(state=tk.NORMAL)
+        self._bc_diag_text.delete("1.0", tk.END)
+
+        self._bc_diag_text.insert(tk.END,
+            f"URL: {result.url}\n"
+            f"Timestamp: {result.timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n\n",
+            "header"
+        )
+
+        for diag in result.diagnosis:
+            if "CRITICAL" in diag or "FATAL" in diag:
+                tag = "critical"
+            elif "WARNING" in diag:
+                tag = "warning"
+            elif "INFO" in diag:
+                tag = "info"
+            else:
+                tag = "ok"
+            self._bc_diag_text.insert(tk.END, f"  • {diag}\n", tag)
+
+        self._bc_diag_text.configure(state=tk.DISABLED)
+
+        # Log to event log
+        if valid:
+            fastest = min(valid, key=lambda p: p.total_ms)
+            self._log_event(
+                "INFO", "Browser Compare",
+                f"{result.url} — fastest: {fastest.browser_name} "
+                f"({fastest.total_ms:.0f}ms)"
+            )
+
+    def _draw_browser_chart(self, result: BrowserCompareResult) -> None:
+        """Draw grouped horizontal bars comparing browser timings."""
+        canvas = self._bc_chart
+        canvas.delete("all")
+
+        w = canvas.winfo_width() or 800
+        h = canvas.winfo_height() or 200
+
+        valid = [p for p in result.probes if not p.error and p.total_ms > 0]
+        if not valid:
+            canvas.create_text(w / 2, h / 2, text="No valid results",
+                                fill=COLORS["fg_dim"], font=("Segoe UI", 12))
+            return
+
+        # Phase colors
+        phase_colors = {
+            "DNS": "#89b4fa",
+            "TCP": "#94e2d5",
+            "TLS": "#cba6f7",
+            "TTFB": "#f9e2af",
+            "Download": "#a6e3a1",
+        }
+
+        max_total = max(p.total_ms for p in valid)
+        if max_total <= 0:
+            return
+
+        label_w = 100
+        bar_area = w - label_w - 100
+        speed_area_x = w - 90
+
+        bar_h = min(28, (h - 40) / max(len(valid), 1) - 6)
+        y_start = 10
+
+        # Phase legend at top-right
+        lx = label_w + 10
+        ly = h - 16
+        for pname, pcolor in phase_colors.items():
+            canvas.create_rectangle(lx, ly, lx + 10, ly + 10, fill=pcolor, outline="")
+            canvas.create_text(lx + 14, ly + 5, text=pname, anchor=tk.W,
+                                fill=COLORS["fg_dim"], font=("Segoe UI", 7))
+            lx += 65
+
+        for i, probe in enumerate(valid):
+            y = y_start + i * (bar_h + 8)
+            browser_color = BROWSER_PROFILES.get(probe.browser_name, {}).get("color", COLORS["fg_dim"])
+
+            # Browser label
+            canvas.create_text(
+                label_w - 5, y + bar_h / 2,
+                text=probe.browser_name, anchor=tk.E, fill=browser_color,
+                font=("Segoe UI", 10, "bold")
+            )
+
+            # Stacked bar for phases
+            phases = [
+                ("DNS", max(probe.dns_ms, 0)),
+                ("TCP", max(probe.tcp_connect_ms, 0)),
+                ("TLS", max(probe.tls_handshake_ms, 0)),
+                ("TTFB", max(probe.ttfb_ms, 0)),
+                ("Download", max(probe.download_ms, 0)),
+            ]
+
+            x_pos = label_w
+            for pname, pms in phases:
+                segment_w = max(1, (pms / max_total) * bar_area) if pms > 0 else 0
+                if segment_w > 0:
+                    canvas.create_rectangle(
+                        x_pos, y, x_pos + segment_w, y + bar_h,
+                        fill=phase_colors[pname], outline=""
+                    )
+                    x_pos += segment_w
+
+            # Total ms label
+            is_fastest = (probe.total_ms == min(p.total_ms for p in valid))
+            label_color = COLORS["green"] if is_fastest else COLORS["fg_dim"]
+            suffix = " ★" if is_fastest else ""
+            canvas.create_text(
+                x_pos + 5, y + bar_h / 2,
+                text=f"{probe.total_ms:.0f}ms{suffix}", anchor=tk.W,
+                fill=label_color,
+                font=("Consolas", 9, "bold" if is_fastest else "")
+            )
+
+            # Speed gauge on the right
+            if probe.speed_mbps > 0:
+                if probe.speed_mbps >= 10:
+                    spd_color = COLORS["green"]
+                elif probe.speed_mbps >= 2:
+                    spd_color = COLORS["yellow"]
+                else:
+                    spd_color = COLORS["red"]
+                canvas.create_text(
+                    speed_area_x, y + bar_h / 2,
+                    text=f"{probe.speed_mbps:.1f} Mbps", anchor=tk.W,
+                    fill=spd_color, font=("Consolas", 9)
+                )
+
+    def _save_browser_compare_results(self) -> None:
+        """Save browser comparison results to a text file."""
+        result = self._bc_last_result
+        if not result:
+            return
+
+        from tkinter import filedialog as _fd
+        path = _fd.asksaveasfilename(
+            initialdir=os.getcwd(),
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            title="Save Browser Comparison Results",
+            initialfile=f"browser_compare_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+        )
+        if not path:
+            return
+
+        lines = []
+        lines.append("NetProbe Browser Comparison Results")
+        lines.append("===================================")
+        lines.append(f"Timestamp:  {result.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append(f"URL:        {result.url}")
+        lines.append(f"Fastest:    {result.fastest_browser}")
+        lines.append(f"Slowest:    {result.slowest_browser}")
+        lines.append("")
+
+        lines.append("Timing Breakdown by Browser")
+        lines.append("---------------------------")
+        lines.append(
+            f"{'Browser':<15} {'HTTP':>4}  {'DNS':>7}  {'TCP':>7}  "
+            f"{'TLS':>7}  {'TTFB':>7}  {'DL':>7}  {'Total':>8}  "
+            f"{'Speed':>10}  {'Size':>8}  {'Enc':>6}  {'Code':>4}"
+        )
+        lines.append("-" * 120)
+        for p in result.probes:
+            if p.error:
+                lines.append(f"{p.browser_name:<15} ERROR: {p.error}")
+            else:
+                speed_str = f"{p.speed_mbps:.1f} Mbps" if p.speed_mbps > 0 else "—"
+                size_str = f"{p.content_length / 1024:.0f} KB" if p.content_length > 0 else "—"
+                lines.append(
+                    f"{p.browser_name:<15} {p.http_version:>4}  "
+                    f"{p.dns_ms:>6.0f}ms {p.tcp_connect_ms:>6.0f}ms "
+                    f"{p.tls_handshake_ms:>6.0f}ms {p.ttfb_ms:>6.0f}ms "
+                    f"{p.download_ms:>6.0f}ms {p.total_ms:>7.0f}ms "
+                    f"{speed_str:>10}  {size_str:>8}  "
+                    f"{(p.content_encoding or 'none'):>6}  {p.http_code:>4}"
+                )
+        lines.append("")
+
+        lines.append("Analysis")
+        lines.append("--------")
+        for diag in result.diagnosis:
+            lines.append(diag)
+        lines.append("")
+
+        # Per-browser response details
+        for p in result.probes:
+            if not p.error:
+                lines.append(f"--- {p.browser_name} ---")
+                lines.append(f"  Effective URL: {p.effective_url}")
+                lines.append(f"  Remote IP:     {p.remote_ip}")
+                lines.append(f"  Redirects:     {p.redirect_count}")
+                lines.append(f"  Content-Type:  {p.content_type}")
+                lines.append(f"  Encoding:      {p.content_encoding or 'none'}")
+                lines.append("")
+
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines))
+
+        self._bc_status_var.set(f"Results saved to {os.path.basename(path)}")
+        self._log_event("INFO", "Browser Compare", f"Results saved to {path}")
+
+    # --- Tab 9: Event Log ---
 
     def _build_log_tab(self) -> None:
         """Build the scrollable spike/anomaly event log."""
