@@ -1550,6 +1550,10 @@ class NetProbeGUI:
         self._bc_status_var = tk.StringVar(value="Select browsers and click Compare")
         if not self.browser_probe.curl_available:
             self._bc_status_var.set("⚠ curl.exe not found — browser compare unavailable")
+        elif self.browser_probe.http2_supported:
+            self._bc_status_var.set("Ready — HTTP/2 supported ✓")
+        else:
+            self._bc_status_var.set("Ready — HTTP/1.1 only (install curl with nghttp2 for HTTP/2)")
         ttk.Label(row2, textvariable=self._bc_status_var, style="Dim.TLabel").pack(
             side=tk.RIGHT, padx=5)
 

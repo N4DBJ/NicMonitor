@@ -243,18 +243,38 @@ class BrowserCompareResult:
 # ---------------------------------------------------------------------------
 
 def find_curl() -> Optional[str]:
-    """Locate curl.exe on the system."""
+    """Locate curl.exe on the system, preferring builds with HTTP/2 support."""
+    # Check common locations that might have HTTP/2 (nghttp2) support
+    # before falling back to the Windows built-in (which typically lacks it)
+    h2_candidates = [
+        r"C:\ProgramData\chocolatey\bin\curl.exe",
+    ]
+    for candidate in h2_candidates:
+        if os.path.isfile(candidate):
+            return candidate
+
     path = shutil.which("curl.exe") or shutil.which("curl")
     if path:
         return path
-    # Common Windows locations
     for candidate in [
         r"C:\Windows\System32\curl.exe",
-        r"C:\ProgramData\chocolatey\bin\curl.exe",
     ]:
         if os.path.isfile(candidate):
             return candidate
     return None
+
+
+def _curl_supports_http2(curl_path: str) -> bool:
+    """Check if this curl build supports HTTP/2."""
+    try:
+        out = subprocess.check_output(
+            [curl_path, "--version"],
+            text=True, timeout=5,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        return "nghttp2" in out.lower()
+    except Exception:
+        return False
 
 
 # Curl write-out format: outputs timing + metadata as key=value pairs
@@ -281,6 +301,9 @@ class BrowserProbeMonitor:
     def __init__(self) -> None:
         self.curl_path = find_curl()
         self.curl_available = self.curl_path is not None
+        self.http2_supported = (
+            _curl_supports_http2(self.curl_path) if self.curl_path else False
+        )
         self._lock = threading.Lock()
         self._history: List[BrowserCompareResult] = []
 
@@ -309,6 +332,13 @@ class BrowserProbeMonitor:
             "-w", _CURL_FORMAT,       # write-out timing format
             "--connect-timeout", str(int(timeout)),
             "--max-time", str(int(timeout + 5)),
+        ]
+
+        # Request HTTP/2 if curl supports it
+        if self.http2_supported:
+            cmd.append("--http2")
+
+        cmd.extend([
             "-A", profile["user_agent"],
             "-H", f"Accept: {profile['accept']}",
             "-H", f"Accept-Encoding: {profile['accept_encoding']}",
@@ -319,7 +349,7 @@ class BrowserProbeMonitor:
             "-H", f"Sec-Fetch-Site: none",
             "-H", f"Sec-Fetch-User: ?1",
             "-H", "Upgrade-Insecure-Requests: 1",
-        ]
+        ])
 
         if follow_redirects:
             cmd.extend(["-L", "--max-redirs", "10"])
