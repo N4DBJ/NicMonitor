@@ -46,7 +46,10 @@ from netprobe.reporter import Reporter
 from netprobe.nic_monitor import NicMonitor
 from netprobe.capture_monitor import CaptureMonitor
 from netprobe.web_monitor import WebProbeMonitor, WebProbeResult
-from netprobe.browser_probe import BrowserProbeMonitor, BrowserCompareResult, BROWSER_PROFILES
+from netprobe.browser_probe import (
+    BrowserProbeMonitor, BrowserCompareResult, MultiRunResult,
+    BROWSER_PROFILES, clear_network_caches,
+)
 
 logger = logging.getLogger("netprobe.gui")
 
@@ -1517,6 +1520,18 @@ class NetProbeGUI:
         )
         self._bc_go_btn.pack(side=tk.LEFT, padx=3)
 
+        self._bc_multi_btn = ttk.Button(
+            row, text="▶ Run 10×", style="Start.TButton",
+            command=self._on_browser_compare_multi
+        )
+        self._bc_multi_btn.pack(side=tk.LEFT, padx=3)
+
+        self._bc_clear_cache_btn = ttk.Button(
+            row, text="🗑 Clear Caches",
+            command=self._on_clear_network_caches
+        )
+        self._bc_clear_cache_btn.pack(side=tk.LEFT, padx=3)
+
         # Options row
         row2 = ttk.Frame(input_frame)
         row2.pack(fill=tk.X, padx=8, pady=(0, 6))
@@ -1539,7 +1554,11 @@ class NetProbeGUI:
 
         self._bc_redirect_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(row2, text="Follow redirects",
-                         variable=self._bc_redirect_var).pack(side=tk.LEFT, padx=(0, 15))
+                         variable=self._bc_redirect_var).pack(side=tk.LEFT, padx=(0, 10))
+
+        self._bc_clear_cache_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row2, text="Clear caches between runs",
+                         variable=self._bc_clear_cache_var).pack(side=tk.LEFT, padx=(0, 15))
 
         self._bc_save_btn = ttk.Button(
             row2, text="💾 Save Results",
@@ -1617,6 +1636,33 @@ class NetProbeGUI:
 
         # Last comparison result for saving
         self._bc_last_result: Optional[BrowserCompareResult] = None
+        self._bc_last_multi: Optional[MultiRunResult] = None
+
+    def _on_clear_network_caches(self) -> None:
+        """Flush DNS, ARP, and NetBIOS caches."""
+        self._bc_status_var.set("Clearing caches...")
+
+        def _run():
+            msgs = clear_network_caches()
+            summary = "  |  ".join(msgs)
+            self.root.after(0, lambda: self._bc_status_var.set(summary))
+            self.root.after(0, lambda: self._log_event(
+                "INFO", "Cache Clear", summary))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _bc_get_selected_browsers(self):
+        """Return list of selected browser names."""
+        browsers = []
+        if self._bc_chrome_var.get():
+            browsers.append("Chrome")
+        if self._bc_firefox_var.get():
+            browsers.append("Firefox")
+        if self._bc_edge_var.get():
+            browsers.append("Edge")
+        if self._bc_raw_var.get():
+            browsers.append("Raw (no UA)")
+        return browsers
 
     def _on_browser_compare_go(self) -> None:
         """Launch browser comparison probes in a background thread."""
@@ -1628,22 +1674,13 @@ class NetProbeGUI:
             self._bc_status_var.set("curl.exe not found — cannot run browser compare")
             return
 
-        # Build list of selected browsers
-        browsers = []
-        if self._bc_chrome_var.get():
-            browsers.append("Chrome")
-        if self._bc_firefox_var.get():
-            browsers.append("Firefox")
-        if self._bc_edge_var.get():
-            browsers.append("Edge")
-        if self._bc_raw_var.get():
-            browsers.append("Raw (no UA)")
-
+        browsers = self._bc_get_selected_browsers()
         if len(browsers) < 2:
             self._bc_status_var.set("Select at least 2 browsers to compare")
             return
 
         self._bc_go_btn.configure(state=tk.DISABLED)
+        self._bc_multi_btn.configure(state=tk.DISABLED)
         self._bc_status_var.set(f"Probing {url} with {len(browsers)} browsers...")
 
         follow = self._bc_redirect_var.get()
@@ -1656,10 +1693,51 @@ class NetProbeGUI:
 
         threading.Thread(target=_run, daemon=True, name="BrowserCompare").start()
 
+    def _on_browser_compare_multi(self) -> None:
+        """Run 10× iterations and show averaged results."""
+        url = self._bc_url_var.get().strip()
+        if not url or url == "https://":
+            return
+
+        if not self.browser_probe.curl_available:
+            self._bc_status_var.set("curl.exe not found — cannot run browser compare")
+            return
+
+        browsers = self._bc_get_selected_browsers()
+        if len(browsers) < 2:
+            self._bc_status_var.set("Select at least 2 browsers to compare")
+            return
+
+        self._bc_go_btn.configure(state=tk.DISABLED)
+        self._bc_multi_btn.configure(state=tk.DISABLED)
+        self._bc_status_var.set(f"Run 1/10 — probing {url}...")
+
+        follow = self._bc_redirect_var.get()
+        clear = self._bc_clear_cache_var.get()
+
+        def _progress(done, total):
+            self.root.after(0, lambda d=done, t=total:
+                self._bc_status_var.set(
+                    f"Run {d}/{t} — probing {url}..."
+                    + (" (clearing caches)" if clear else "")
+                ))
+
+        def _run():
+            result = self.browser_probe.compare_multi(
+                url, iterations=10, browsers=browsers,
+                follow_redirects=follow, clear_caches=clear,
+                progress_callback=_progress,
+            )
+            self.root.after(0, lambda: self._display_multi_run(result))
+
+        threading.Thread(target=_run, daemon=True, name="BrowserMulti").start()
+
     def _display_browser_compare(self, result: BrowserCompareResult) -> None:
         """Display browser comparison results."""
         self._bc_go_btn.configure(state=tk.NORMAL)
+        self._bc_multi_btn.configure(state=tk.NORMAL)
         self._bc_last_result = result
+        self._bc_last_multi = None
         self._bc_save_btn.configure(state=tk.NORMAL)
 
         valid = [p for p in result.probes if not p.error and p.total_ms > 0]
@@ -1733,6 +1811,202 @@ class NetProbeGUI:
                 f"{result.url} — fastest: {fastest.browser_name} "
                 f"({fastest.total_ms:.0f}ms)"
             )
+
+    def _display_multi_run(self, result: MultiRunResult) -> None:
+        """Display aggregated 10× multi-run results."""
+        self._bc_go_btn.configure(state=tk.NORMAL)
+        self._bc_multi_btn.configure(state=tk.NORMAL)
+        self._bc_last_multi = result
+        self._bc_last_result = None
+        self._bc_save_btn.configure(state=tk.NORMAL)
+
+        valid = [s for s in result.summaries if s.runs > 0]
+        if not valid:
+            self._bc_status_var.set("All 10 runs failed — check URL and network")
+        else:
+            fastest = min(valid, key=lambda s: s.avg_total_ms)
+            self._bc_status_var.set(
+                f"10× done — Fastest avg: {fastest.browser_name} at "
+                f"{fastest.avg_total_ms:.0f}ms (σ {fastest.stdev_total_ms:.0f}ms)"
+            )
+
+        # ----- Draw multi-run chart -----
+        self._draw_multi_chart(result)
+
+        # ----- Populate results table with averages -----
+        for item in self._bc_tree.get_children():
+            self._bc_tree.delete(item)
+
+        def _fmt(ms):
+            return f"{ms:.0f}ms" if ms >= 0 else "—"
+
+        for s in result.summaries:
+            if s.runs == 0:
+                self._bc_tree.insert("", tk.END, values=(
+                    s.browser_name, "—", "—", "—", "—", "—", "—", "—",
+                    "—", "—", f"{s.errors} err", "—"
+                ))
+            else:
+                speed_str = f"{s.avg_speed_mbps:.1f} Mbps" if s.avg_speed_mbps > 0 else "—"
+                stdev_str = f"σ {s.stdev_total_ms:.0f}ms"
+                self._bc_tree.insert("", tk.END, values=(
+                    s.browser_name,
+                    f"×{s.runs}",
+                    _fmt(s.avg_dns_ms), _fmt(s.avg_tcp_ms),
+                    _fmt(s.avg_tls_ms), _fmt(s.avg_ttfb_ms),
+                    _fmt(s.avg_download_ms), _fmt(s.avg_total_ms),
+                    speed_str, stdev_str,
+                    f"{s.min_total_ms:.0f}–{s.max_total_ms:.0f}",
+                    f"{s.errors} err" if s.errors else "OK",
+                ))
+
+        # ----- Diagnosis text -----
+        self._bc_diag_text.configure(state=tk.NORMAL)
+        self._bc_diag_text.delete("1.0", tk.END)
+
+        self._bc_diag_text.insert(tk.END,
+            f"Multi-Run Summary (10× iterations)\n"
+            f"URL: {result.url}\n"
+            f"Timestamp: {result.timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n\n",
+            "header"
+        )
+
+        for diag in result.diagnosis:
+            if "CRITICAL" in diag or "FATAL" in diag:
+                tag = "critical"
+            elif "WARNING" in diag:
+                tag = "warning"
+            elif "INFO" in diag:
+                tag = "info"
+            else:
+                tag = "ok"
+            self._bc_diag_text.insert(tk.END, f"  • {diag}\n", tag)
+
+        self._bc_diag_text.configure(state=tk.DISABLED)
+
+        if valid:
+            fastest = min(valid, key=lambda s: s.avg_total_ms)
+            self._log_event(
+                "INFO", "Browser Compare 10×",
+                f"{result.url} — fastest avg: {fastest.browser_name} "
+                f"({fastest.avg_total_ms:.0f}ms, σ {fastest.stdev_total_ms:.0f}ms)"
+            )
+
+    def _draw_multi_chart(self, result: MultiRunResult) -> None:
+        """Draw multi-run chart with avg bars, min/max whiskers, and scatter dots."""
+        canvas = self._bc_chart
+        canvas.delete("all")
+
+        w = canvas.winfo_width() or 800
+        h = canvas.winfo_height() or 200
+
+        valid = [s for s in result.summaries if s.runs > 0]
+        if not valid:
+            canvas.create_text(w / 2, h / 2, text="No valid results",
+                                fill=COLORS["fg_dim"], font=("Segoe UI", 12))
+            return
+
+        phase_colors = {
+            "DNS": "#89b4fa",
+            "TCP": "#94e2d5",
+            "TLS": "#cba6f7",
+            "TTFB": "#f9e2af",
+            "Download": "#a6e3a1",
+        }
+
+        max_total = max(s.max_total_ms for s in valid)
+        if max_total <= 0:
+            return
+
+        label_w = 100
+        bar_area = w - label_w - 120
+        speed_area_x = w - 110
+
+        bar_h = min(28, (h - 40) / max(len(valid), 1) - 6)
+        y_start = 10
+
+        # Phase legend
+        lx = label_w + 10
+        ly = h - 16
+        for pname, pcolor in phase_colors.items():
+            canvas.create_rectangle(lx, ly, lx + 10, ly + 10, fill=pcolor, outline="")
+            canvas.create_text(lx + 14, ly + 5, text=pname, anchor=tk.W,
+                                fill=COLORS["fg_dim"], font=("Segoe UI", 7))
+            lx += 65
+
+        for i, s in enumerate(valid):
+            y = y_start + i * (bar_h + 8)
+            browser_color = BROWSER_PROFILES.get(s.browser_name, {}).get("color", COLORS["fg_dim"])
+
+            # Browser label
+            canvas.create_text(
+                label_w - 5, y + bar_h / 2,
+                text=s.browser_name, anchor=tk.E, fill=browser_color,
+                font=("Segoe UI", 10, "bold")
+            )
+
+            # Stacked avg bar
+            phases = [
+                ("DNS", max(s.avg_dns_ms, 0)),
+                ("TCP", max(s.avg_tcp_ms, 0)),
+                ("TLS", max(s.avg_tls_ms, 0)),
+                ("TTFB", max(s.avg_ttfb_ms, 0)),
+                ("Download", max(s.avg_download_ms, 0)),
+            ]
+
+            x_pos = label_w
+            for pname, pms in phases:
+                seg_w = max(1, (pms / max_total) * bar_area) if pms > 0 else 0
+                if seg_w > 0:
+                    canvas.create_rectangle(
+                        x_pos, y, x_pos + seg_w, y + bar_h,
+                        fill=phase_colors[pname], outline=""
+                    )
+                    x_pos += seg_w
+
+            # Min/max whiskers (horizontal line showing range)
+            min_x = label_w + (s.min_total_ms / max_total) * bar_area
+            max_x = label_w + (s.max_total_ms / max_total) * bar_area
+            mid_y = y + bar_h / 2
+            canvas.create_line(min_x, mid_y, max_x, mid_y,
+                               fill=COLORS["fg_dim"], width=1, dash=(2, 2))
+            canvas.create_line(min_x, y + 2, min_x, y + bar_h - 2,
+                               fill=COLORS["fg_dim"], width=1)
+            canvas.create_line(max_x, y + 2, max_x, y + bar_h - 2,
+                               fill=COLORS["fg_dim"], width=1)
+
+            # Scatter individual run dots
+            for t in s.all_totals:
+                dot_x = label_w + (t / max_total) * bar_area
+                canvas.create_oval(
+                    dot_x - 2, mid_y - 2, dot_x + 2, mid_y + 2,
+                    fill=browser_color, outline=""
+                )
+
+            # Avg label
+            is_fastest = (s.avg_total_ms == min(v.avg_total_ms for v in valid))
+            label_color = COLORS["green"] if is_fastest else COLORS["fg_dim"]
+            suffix = " ★" if is_fastest else ""
+            canvas.create_text(
+                max_x + 5, mid_y,
+                text=f"avg {s.avg_total_ms:.0f}ms{suffix}",
+                anchor=tk.W, fill=label_color,
+                font=("Consolas", 9, "bold" if is_fastest else "")
+            )
+
+            # Speed gauge
+            if s.avg_speed_mbps > 0:
+                if s.avg_speed_mbps >= 10:
+                    spd_color = COLORS["green"]
+                elif s.avg_speed_mbps >= 2:
+                    spd_color = COLORS["yellow"]
+                else:
+                    spd_color = COLORS["red"]
+                canvas.create_text(
+                    speed_area_x, mid_y,
+                    text=f"{s.avg_speed_mbps:.1f} Mbps", anchor=tk.W,
+                    fill=spd_color, font=("Consolas", 9)
+                )
 
     def _draw_browser_chart(self, result: BrowserCompareResult) -> None:
         """Draw grouped horizontal bars comparing browser timings."""
@@ -1835,69 +2109,121 @@ class NetProbeGUI:
     def _save_browser_compare_results(self) -> None:
         """Save browser comparison results to a text file."""
         result = self._bc_last_result
-        if not result:
+        multi = self._bc_last_multi
+        if not result and not multi:
             return
 
         from tkinter import filedialog as _fd
+        prefix = "browser_multi10x" if multi else "browser_compare"
         path = _fd.asksaveasfilename(
             initialdir=os.getcwd(),
             defaultextension=".txt",
             filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
             title="Save Browser Comparison Results",
-            initialfile=f"browser_compare_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+            initialfile=f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
         )
         if not path:
             return
 
         lines = []
-        lines.append("NetProbe Browser Comparison Results")
-        lines.append("===================================")
-        lines.append(f"Timestamp:  {result.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
-        lines.append(f"URL:        {result.url}")
-        lines.append(f"Fastest:    {result.fastest_browser}")
-        lines.append(f"Slowest:    {result.slowest_browser}")
-        lines.append("")
 
-        lines.append("Timing Breakdown by Browser")
-        lines.append("---------------------------")
-        lines.append(
-            f"{'Browser':<15} {'HTTP':>4}  {'DNS':>7}  {'TCP':>7}  "
-            f"{'TLS':>7}  {'TTFB':>7}  {'DL':>7}  {'Total':>8}  "
-            f"{'Speed':>10}  {'Size':>8}  {'Enc':>6}  {'Code':>4}"
-        )
-        lines.append("-" * 120)
-        for p in result.probes:
-            if p.error:
-                lines.append(f"{p.browser_name:<15} ERROR: {p.error}")
-            else:
-                speed_str = f"{p.speed_mbps:.1f} Mbps" if p.speed_mbps > 0 else "—"
-                size_str = f"{p.content_length / 1024:.0f} KB" if p.content_length > 0 else "—"
-                lines.append(
-                    f"{p.browser_name:<15} {p.http_version:>4}  "
-                    f"{p.dns_ms:>6.0f}ms {p.tcp_connect_ms:>6.0f}ms "
-                    f"{p.tls_handshake_ms:>6.0f}ms {p.ttfb_ms:>6.0f}ms "
-                    f"{p.download_ms:>6.0f}ms {p.total_ms:>7.0f}ms "
-                    f"{speed_str:>10}  {size_str:>8}  "
-                    f"{(p.content_encoding or 'none'):>6}  {p.http_code:>4}"
+        if multi:
+            lines.append("NetProbe Browser Comparison — 10× Multi-Run Results")
+            lines.append("====================================================")
+            lines.append(f"Timestamp:   {multi.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+            lines.append(f"URL:         {multi.url}")
+            lines.append(f"Iterations:  {multi.iterations}")
+            lines.append(f"Caches:      {'cleared before each run' if multi.cache_cleared else 'NOT cleared (warm cache)'}")
+            lines.append("")
+
+            lines.append("Average Timing by Browser")
+            lines.append("-------------------------")
+            lines.append(
+                f"{'Browser':<15} {'Runs':>4}  {'DNS':>7}  {'TCP':>7}  "
+                f"{'TLS':>7}  {'TTFB':>7}  {'DL':>7}  {'Avg':>8}  "
+                f"{'Min':>8}  {'Max':>8}  {'StDev':>8}  {'Speed':>10}"
+            )
+            lines.append("-" * 120)
+            for s in multi.summaries:
+                if s.runs == 0:
+                    lines.append(f"{s.browser_name:<15} {s.errors} errors")
+                else:
+                    speed_str = f"{s.avg_speed_mbps:.1f} Mbps" if s.avg_speed_mbps > 0 else "—"
+                    lines.append(
+                        f"{s.browser_name:<15} {s.runs:>4}  "
+                        f"{s.avg_dns_ms:>6.0f}ms {s.avg_tcp_ms:>6.0f}ms "
+                        f"{s.avg_tls_ms:>6.0f}ms {s.avg_ttfb_ms:>6.0f}ms "
+                        f"{s.avg_download_ms:>6.0f}ms {s.avg_total_ms:>7.0f}ms "
+                        f"{s.min_total_ms:>7.0f}ms {s.max_total_ms:>7.0f}ms "
+                        f"{s.stdev_total_ms:>7.0f}ms {speed_str:>10}"
+                    )
+            lines.append("")
+
+            lines.append("Per-Run Totals")
+            lines.append("--------------")
+            for idx, run in enumerate(multi.all_runs, 1):
+                valid_p = [p for p in run.probes if not p.error and p.total_ms > 0]
+                run_line = f"  Run {idx:>2}: "
+                run_line += "  ".join(
+                    f"{p.browser_name}={p.total_ms:.0f}ms" for p in valid_p
                 )
-        lines.append("")
+                lines.append(run_line)
+            lines.append("")
 
-        lines.append("Analysis")
-        lines.append("--------")
-        for diag in result.diagnosis:
-            lines.append(diag)
-        lines.append("")
+            lines.append("Analysis")
+            lines.append("--------")
+            for diag in multi.diagnosis:
+                lines.append(diag)
+            lines.append("")
 
-        # Per-browser response details
-        for p in result.probes:
-            if not p.error:
-                lines.append(f"--- {p.browser_name} ---")
-                lines.append(f"  Effective URL: {p.effective_url}")
-                lines.append(f"  Remote IP:     {p.remote_ip}")
-                lines.append(f"  Redirects:     {p.redirect_count}")
-                lines.append(f"  Content-Type:  {p.content_type}")
-                lines.append(f"  Encoding:      {p.content_encoding or 'none'}")
-                lines.append("")
+        else:
+            lines.append("NetProbe Browser Comparison Results")
+            lines.append("===================================")
+            lines.append(f"Timestamp:  {result.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+            lines.append(f"URL:        {result.url}")
+            lines.append(f"Fastest:    {result.fastest_browser}")
+            lines.append(f"Slowest:    {result.slowest_browser}")
+            lines.append("")
+
+            lines.append("Timing Breakdown by Browser")
+            lines.append("---------------------------")
+            lines.append(
+                f"{'Browser':<15} {'HTTP':>4}  {'DNS':>7}  {'TCP':>7}  "
+                f"{'TLS':>7}  {'TTFB':>7}  {'DL':>7}  {'Total':>8}  "
+                f"{'Speed':>10}  {'Size':>8}  {'Enc':>6}  {'Code':>4}"
+            )
+            lines.append("-" * 120)
+            for p in result.probes:
+                if p.error:
+                    lines.append(f"{p.browser_name:<15} ERROR: {p.error}")
+                else:
+                    speed_str = f"{p.speed_mbps:.1f} Mbps" if p.speed_mbps > 0 else "—"
+                    size_str = f"{p.content_length / 1024:.0f} KB" if p.content_length > 0 else "—"
+                    lines.append(
+                        f"{p.browser_name:<15} {p.http_version:>4}  "
+                        f"{p.dns_ms:>6.0f}ms {p.tcp_connect_ms:>6.0f}ms "
+                        f"{p.tls_handshake_ms:>6.0f}ms {p.ttfb_ms:>6.0f}ms "
+                        f"{p.download_ms:>6.0f}ms {p.total_ms:>7.0f}ms "
+                        f"{speed_str:>10}  {size_str:>8}  "
+                        f"{(p.content_encoding or 'none'):>6}  {p.http_code:>4}"
+                    )
+            lines.append("")
+
+            lines.append("Analysis")
+            lines.append("--------")
+            for diag in result.diagnosis:
+                lines.append(diag)
+            lines.append("")
+
+            for p in result.probes:
+                if not p.error:
+                    lines.append(f"--- {p.browser_name} ---")
+                    lines.append(f"  Effective URL: {p.effective_url}")
+                    lines.append(f"  Remote IP:     {p.remote_ip}")
+                    lines.append(f"  Redirects:     {p.redirect_count}")
+                    lines.append(f"  Content-Type:  {p.content_type}")
+                    lines.append(f"  Encoding:      {p.content_encoding or 'none'}")
+                    lines.append("")
 
         with open(path, "w", encoding="utf-8") as fh:
             fh.write("\n".join(lines))

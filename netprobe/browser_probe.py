@@ -22,12 +22,13 @@ import logging
 import os
 import re
 import shutil
+import statistics
 import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("netprobe.browser_probe")
 
@@ -238,6 +239,128 @@ class BrowserCompareResult:
                 self.diagnosis.append(f"WARNING: {p.browser_name} failed: {p.error}")
 
 
+@dataclass
+class MultiRunSummary:
+    """Per-browser averaged results across multiple runs."""
+    browser_name: str = ""
+    runs: int = 0
+    # Averages
+    avg_dns_ms: float = 0
+    avg_tcp_ms: float = 0
+    avg_tls_ms: float = 0
+    avg_ttfb_ms: float = 0
+    avg_download_ms: float = 0
+    avg_total_ms: float = 0
+    avg_speed_mbps: float = 0
+    # Min / max
+    min_total_ms: float = 0
+    max_total_ms: float = 0
+    # Standard deviation
+    stdev_total_ms: float = 0
+    # Individual totals for charting
+    all_totals: List[float] = field(default_factory=list)
+    # Error count
+    errors: int = 0
+
+
+@dataclass
+class MultiRunResult:
+    """Aggregated result from running compare() N times."""
+    url: str = ""
+    iterations: int = 0
+    timestamp: datetime = field(default_factory=datetime.now)
+    summaries: List[MultiRunSummary] = field(default_factory=list)
+    all_runs: List[BrowserCompareResult] = field(default_factory=list)
+    diagnosis: List[str] = field(default_factory=list)
+    cache_cleared: bool = False
+
+    def analyse(self) -> None:
+        """Produce diagnosis from aggregated multi-run data."""
+        self.diagnosis = []
+        valid = [s for s in self.summaries if s.runs > 0]
+        if not valid:
+            self.diagnosis.append("FATAL: No successful runs")
+            return
+
+        self.diagnosis.append(
+            f"INFO: {self.iterations} iterations completed "
+            f"({'caches cleared before each run' if self.cache_cleared else 'caches NOT cleared — expect warm-cache speedup'})"
+        )
+
+        # Find fastest/slowest by average
+        by_avg = sorted(valid, key=lambda s: s.avg_total_ms)
+        fastest = by_avg[0]
+        slowest = by_avg[-1]
+        self.diagnosis.append(
+            f"INFO: Fastest avg: {fastest.browser_name} at {fastest.avg_total_ms:.0f}ms  |  "
+            f"Slowest avg: {slowest.browser_name} at {slowest.avg_total_ms:.0f}ms"
+        )
+
+        # Consistency analysis per browser
+        for s in valid:
+            if s.stdev_total_ms > 100:
+                self.diagnosis.append(
+                    f"WARNING: {s.browser_name} — high variability "
+                    f"(stdev {s.stdev_total_ms:.0f}ms, range {s.min_total_ms:.0f}–{s.max_total_ms:.0f}ms)"
+                )
+            else:
+                self.diagnosis.append(
+                    f"OK: {s.browser_name} — consistent "
+                    f"(stdev {s.stdev_total_ms:.0f}ms, range {s.min_total_ms:.0f}–{s.max_total_ms:.0f}ms)"
+                )
+
+        # Cache effect: compare run 1 vs runs 2+ if caches were NOT cleared
+        if not self.cache_cleared and len(self.all_runs) >= 2:
+            for s in valid:
+                first_runs = [p.total_ms for r in self.all_runs[:1]
+                              for p in r.probes
+                              if p.browser_name == s.browser_name and not p.error and p.total_ms > 0]
+                later_runs = [p.total_ms for r in self.all_runs[1:]
+                              for p in r.probes
+                              if p.browser_name == s.browser_name and not p.error and p.total_ms > 0]
+                if first_runs and later_runs:
+                    first_avg = statistics.mean(first_runs)
+                    later_avg = statistics.mean(later_runs)
+                    diff = first_avg - later_avg
+                    if diff > 50:
+                        self.diagnosis.append(
+                            f"INFO: {s.browser_name} — caching effect: "
+                            f"1st run {first_avg:.0f}ms → later avg {later_avg:.0f}ms "
+                            f"(Δ{diff:.0f}ms faster due to DNS/TLS/ARP caches)"
+                        )
+
+        # Errors
+        for s in valid:
+            if s.errors > 0:
+                self.diagnosis.append(
+                    f"WARNING: {s.browser_name} — {s.errors}/{s.runs + s.errors} runs failed"
+                )
+
+
+def clear_network_caches() -> List[str]:
+    """Flush DNS, ARP, and NetBIOS caches. Requires elevated privileges for ARP.
+    Returns a list of status messages."""
+    messages = []
+    cmds = [
+        (["ipconfig", "/flushdns"], "DNS cache"),
+        (["netsh", "interface", "ip", "delete", "arpcache"], "ARP cache"),
+        (["nbtstat", "-R"], "NetBIOS cache"),
+    ]
+    for cmd, label in cmds:
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            if proc.returncode == 0:
+                messages.append(f"✓ {label} flushed")
+            else:
+                messages.append(f"⚠ {label}: {proc.stderr.strip() or 'failed (may need admin)'}")
+        except Exception as exc:
+            messages.append(f"⚠ {label}: {exc}")
+    return messages
+
+
 # ---------------------------------------------------------------------------
 # Curl-based prober
 # ---------------------------------------------------------------------------
@@ -313,8 +436,11 @@ class BrowserProbeMonitor:
         browser_name: str,
         follow_redirects: bool = True,
         timeout: float = 15.0,
+        fresh: bool = False,
     ) -> BrowserProbeResult:
-        """Probe a URL with a specific browser identity using curl."""
+        """Probe a URL with a specific browser identity using curl.
+        If fresh=True, disables TLS session tickets and connection reuse
+        to simulate a cold start."""
         result = BrowserProbeResult(
             browser_name=browser_name, url=url, timestamp=datetime.now()
         )
@@ -338,12 +464,16 @@ class BrowserProbeMonitor:
         if self.http2_supported:
             cmd.append("--http2")
 
+        # Fresh mode: disable TLS session reuse and connection keep-alive
+        if fresh:
+            cmd.append("--no-sessionid")
+
         cmd.extend([
             "-A", profile["user_agent"],
             "-H", f"Accept: {profile['accept']}",
             "-H", f"Accept-Encoding: {profile['accept_encoding']}",
             "-H", f"Accept-Language: {profile['accept_language']}",
-            "-H", "Connection: keep-alive",
+            "-H", "Connection: close" if fresh else "Connection: keep-alive",
             "-H", f"Sec-Fetch-Dest: document",
             "-H", f"Sec-Fetch-Mode: navigate",
             "-H", f"Sec-Fetch-Site: none",
@@ -426,6 +556,7 @@ class BrowserProbeMonitor:
         browsers: Optional[List[str]] = None,
         follow_redirects: bool = True,
         timeout: float = 15.0,
+        fresh: bool = False,
     ) -> BrowserCompareResult:
         """
         Probe a URL with multiple browser identities in parallel
@@ -441,7 +572,7 @@ class BrowserProbeMonitor:
         lock = threading.Lock()
 
         def _probe(bname):
-            r = self.probe_single(url, bname, follow_redirects, timeout)
+            r = self.probe_single(url, bname, follow_redirects, timeout, fresh=fresh)
             with lock:
                 results.append(r)
 
@@ -467,6 +598,66 @@ class BrowserProbeMonitor:
                 self._history = self._history[-50:]
 
         return compare_result
+
+    def compare_multi(
+        self,
+        url: str,
+        iterations: int = 10,
+        browsers: Optional[List[str]] = None,
+        follow_redirects: bool = True,
+        timeout: float = 15.0,
+        clear_caches: bool = False,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> MultiRunResult:
+        """
+        Run compare() *iterations* times and aggregate averages,
+        min, max, stdev per browser.
+        """
+        multi = MultiRunResult(
+            url=url, iterations=iterations,
+            timestamp=datetime.now(), cache_cleared=clear_caches,
+        )
+
+        for i in range(iterations):
+            if clear_caches:
+                clear_network_caches()
+            result = self.compare(url, browsers=browsers,
+                                  follow_redirects=follow_redirects,
+                                  timeout=timeout,
+                                  fresh=clear_caches)
+            multi.all_runs.append(result)
+            if progress_callback:
+                progress_callback(i + 1, iterations)
+
+        # Aggregate per browser
+        browser_data: Dict[str, List[BrowserProbeResult]] = {}
+        for run in multi.all_runs:
+            for p in run.probes:
+                browser_data.setdefault(p.browser_name, []).append(p)
+
+        for bname, probes in browser_data.items():
+            valid = [p for p in probes if not p.error and p.total_ms > 0]
+            s = MultiRunSummary(browser_name=bname)
+            s.runs = len(valid)
+            s.errors = len(probes) - len(valid)
+            if valid:
+                totals = [p.total_ms for p in valid]
+                s.all_totals = totals
+                s.avg_dns_ms = statistics.mean([p.dns_ms for p in valid])
+                s.avg_tcp_ms = statistics.mean([p.tcp_connect_ms for p in valid])
+                s.avg_tls_ms = statistics.mean([p.tls_handshake_ms for p in valid])
+                s.avg_ttfb_ms = statistics.mean([p.ttfb_ms for p in valid])
+                s.avg_download_ms = statistics.mean([p.download_ms for p in valid])
+                s.avg_total_ms = statistics.mean(totals)
+                s.min_total_ms = min(totals)
+                s.max_total_ms = max(totals)
+                s.stdev_total_ms = statistics.stdev(totals) if len(totals) >= 2 else 0
+                speeds = [p.speed_mbps for p in valid if p.speed_mbps > 0]
+                s.avg_speed_mbps = statistics.mean(speeds) if speeds else 0
+            multi.summaries.append(s)
+
+        multi.analyse()
+        return multi
 
     @property
     def history(self) -> List[BrowserCompareResult]:
